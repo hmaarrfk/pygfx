@@ -24,6 +24,7 @@ class ImageBasicMaterial(Material):
     uniform_type = dict(
         Material.uniform_type,
         clim="2xf4",
+        gamma="f4",
     )
 
     def __init__(
@@ -32,11 +33,13 @@ class ImageBasicMaterial(Material):
         map=None,
         interpolation="nearest",
         map_interpolation="linear",
+        gamma=None,
         **kwargs
     ):
         super().__init__(**kwargs)
         self.map = map
         self.clim = clim
+        self.gamma = gamma
         self.interpolation = interpolation
         self.map_interpolation = map_interpolation
 
@@ -68,6 +71,21 @@ class ImageBasicMaterial(Material):
         clim = float(clim[0]), float(clim[1])
         # Update uniform data
         self.uniform_buffer.data["clim"] = clim
+        self.uniform_buffer.update_range(0, 1)
+
+    @property
+    def gamma(self):
+        v1 = self.uniform_buffer.data["gamma"]
+        return float(v1)
+
+    @gamma.setter
+    def gamma(self, gamma):
+        # Check and store given gamma
+        if gamma is None:
+            gamma = 1
+        gamma = float(gamma)
+        # Update uniform data
+        self.uniform_buffer.data["gamma"] = gamma
         self.uniform_buffer.update_range(0, 1)
 
     @property
