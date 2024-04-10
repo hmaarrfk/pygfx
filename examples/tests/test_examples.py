@@ -13,13 +13,12 @@ import runpy
 import sys
 from unittest.mock import patch
 
-import pygfx as gfx
 import imageio.v3 as iio
 import numpy as np
 import pytest
 
 from .testutils import (
-    wgpu_backend,
+    adapter,
     is_lavapipe,
     find_examples,
     ROOT,
@@ -48,12 +47,8 @@ log_handler = LogHandler(logging.WARN)
 logging.getLogger().addHandler(log_handler)
 
 
-# Initialize the device, to avoid Rust warnings from showing in the first example
-gfx.renderers.wgpu.get_shared()
-
-
 def test_that_we_are_on_lavapipe():
-    print(wgpu_backend)
+    print(adapter.info)
     if os.getenv("PYGFX_EXPECT_LAVAPIPE"):
         assert is_lavapipe
 
@@ -93,7 +88,24 @@ def test_examples_run(filename, force_offscreen):
     # Reset logged warnings/errors
     log_handler.records = []
 
-    runpy.run_path(filename, run_name="__main__")
+    try:
+        runpy.run_path(filename, run_name="__main__")
+    except (ModuleNotFoundError, ImportError) as e:
+        str_e = str(e)
+        if str_e == "No module named 'trimesh'":
+            pytest.skip("trimesh is not installed")
+        elif (
+            str_e
+            == "The `gltflib` library is required to load gltf scene: pip install gltflib"
+        ):
+            pytest.skip("gltflib is not installed")
+        elif (
+            str_e
+            == "The `trimesh` library is required to load meshes: pip install trimesh"
+        ):
+            pytest.skip("trimesh is not installed")
+        else:
+            raise e
 
     # If any errors occurred in the draw callback, they are logged
     if log_handler.records:
@@ -121,7 +133,10 @@ def test_examples_compare(filename, pytestconfig, force_offscreen, mock_time):
     # the first part of the test everywhere else; ensuring that examples
     # can at least import, run and render something
     if not is_lavapipe:
-        pytest.skip("screenshot comparisons are only done when using lavapipe")
+        pytest.skip(
+            "screenshot comparisons are only done when using lavapipe. "
+            "Rerun with PYGFX_WGPU_ADAPTER_NAME=llvmpipe"
+        )
 
     # regenerate screenshot if requested
     screenshot_path = screenshots_dir / f"{module_name}.png"
@@ -177,14 +192,14 @@ def update_diffs(module, is_similar, img, stored_img):
 
     # split into an rgb and an alpha diff
     diffs = {
-        diffs_dir / f"{module}-rgb.png": slice(0, 3),
-        diffs_dir / f"{module}-alpha.png": 3,
+        diffs_dir / f"{module}-rgb.png": lambda: get_diffs_rgba(slice(0, 3)),
+        diffs_dir / f"{module}-alpha.png": lambda: get_diffs_rgba(3),
+        diffs_dir / f"{module}.png": lambda: img,
     }
 
-    for path, slicer in diffs.items():
+    for path, getter in diffs.items():
         if not is_similar:
-            diff = get_diffs_rgba(slicer)
-            iio.imwrite(path, diff)
+            iio.imwrite(path, getter())
         elif path.exists():
             path.unlink()
 
@@ -212,5 +227,4 @@ if __name__ == "__main__":
     # Enable tweaking in an IDE by running in an interactive session.
     os.environ["WGPU_FORCE_OFFSCREEN"] = "true"
     pytest.getoption = lambda x: False
-    is_lavapipe = True  # noqa: F811
     test_examples_compare("validate_volume", pytest, None, None)

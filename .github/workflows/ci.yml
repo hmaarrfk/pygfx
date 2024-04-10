@@ -145,7 +145,7 @@ jobs:
         pip install -e .[dev,examples]
     - name: Show wgpu backend
       run: |
-        python -c "from examples.tests.testutils import wgpu_backend; print(wgpu_backend)"
+        python -c "from examples.tests.testutils import adapter; print(adapter.info)"
     # We make sure to run the compare validation examples section first
     # Since it seems that there is some dependency on the order in which
     # the tests are run. It is unclear what is causing it but this order now
