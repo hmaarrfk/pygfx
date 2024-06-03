@@ -1,6 +1,6 @@
 import wgpu  # only for flags/enums
 
-from ....objects import Text
+from ....objects import Text, TextMultiPart
 from ....materials import TextMaterial
 
 from .. import (
@@ -95,3 +95,51 @@ class TextShader(BaseShader):
 
     def get_code(self):
         return load_wgsl("text.wgsl")
+
+
+
+@register_wgpu_render_function(TextMultiPart, TextMaterial)
+class TextMultiShader(TextShader):
+    type = "render"
+
+    def __init__(self, wobject):
+        super().__init__(wobject)
+        geometry = wobject.geometry
+        material = wobject.material
+        self["screen_space"] = geometry.screen_space
+        self["aa"] = material.aa
+        self["REF_GLYPH_SIZE"] = wobject.geometry.ref_glyph_size
+
+    def get_bindings(self, wobject, shared):
+        geometry = wobject.geometry
+        material = wobject.material
+
+        sbuffer = "buffer/read_only_storage"
+        bindings = [
+            Binding("u_stdinfo", "buffer/uniform", shared.uniform_buffer),
+            Binding("u_wobject", "buffer/uniform", wobject.uniform_buffer),
+            Binding("u_material", "buffer/uniform", material.uniform_buffer),
+            Binding("s_indices", sbuffer, geometry.indices, "VERTEX"),
+            Binding("s_positions", sbuffer, geometry.positions, "VERTEX"),
+            Binding("s_sizes", sbuffer, geometry.sizes, "VERTEX"),
+        ]
+
+        tex = shared.glyph_atlas_texture
+        sampler = GfxSampler("linear", "clamp")
+        tex_view = GfxTextureView(tex)
+        bindings.append(Binding("s_atlas", "sampler/filtering", sampler, "FRAGMENT"))
+        bindings.append(Binding("t_atlas", "texture/auto", tex_view, "FRAGMENT"))
+
+        # Let the shader generate code for our bindings
+        bindings = {i: b for i, b in enumerate(bindings)}
+        self.define_bindings(0, bindings)
+
+        bindings1 = {}
+        bindings1[0] = Binding(
+            "s_glyph_infos", sbuffer, shared.glyph_atlas_info_buffer, "VERTEX"
+        )
+
+        return {
+            0: bindings,
+            1: bindings1,
+        }

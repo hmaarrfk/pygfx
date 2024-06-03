@@ -69,6 +69,7 @@ from ._more import (
     Image,
     Volume,
     Text,
+    TextMultiPart,
 )
 from ._instanced import InstancedMesh
 from ._lights import Light, PointLight, DirectionalLight, AmbientLight, SpotLight

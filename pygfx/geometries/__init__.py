@@ -80,7 +80,7 @@ from ._polyhedron import (
     tetrahedron_geometry,
 )
 from ._toroidal import torus_knot_geometry, klein_bottle_geometry
-from ._text import TextGeometry, TextItem
+from ._text import TextGeometry, TextItem, TextMultiPartGeometry
 
 # Define __all__ for e.g. Sphinx
 __all__ = [
