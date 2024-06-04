@@ -64,11 +64,34 @@ text_top_left = gfx.TextGeometry(
     anchor="top-left",
 )
 
-text_merged = gfx.TextMultiPart(
-    gfx.TextMultiPartGeometry(
-        [text_bottom_right, text_top_right, text_bottom_left, text_top_left],
-        np.zeros((4, 2), dtype=np.float32)
-    ),
+from pygfx.resources import Buffer
+import ipdb; ipdb.set_trace()
+
+multi_text_geometry = gfx.Geometry()
+multi_text_geometry.screen_space = text_top_left.screen_space
+multi_text_geometry.ref_glyph_size = text_top_left.ref_glyph_size
+
+multi_text_geometry.positions=Buffer(np.concatenate([
+    text_bottom_right.positions.data
+    text_top_right.positions.data,
+    text_bottom_left.positions.data,
+    text_top_left.positions.data
+]))
+multi_text_geometry.indices = Buffer(np.concatenate([
+    text_bottom_right.indices.data,
+    text_top_right.indices.data,
+    text_bottom_left.indices.data,
+    text_top_left.indices.data,
+]))
+multi_text_geometry.sizes= Buffer(np.concatenate([
+        text_bottom_right.sizes.data,
+        text_top_right.sizes.data,
+        text_bottom_left.sizes.data,
+        text_top_left.sizes.data,
+]))
+
+text_merged = gfx.Text(
+    multi_text_geometry,
     gfx.TextMaterial(color="#DA9DFF", outline_color="#000", outline_thickness=0.15),
 )
 
