@@ -162,6 +162,52 @@ class GlyphItem:
         # Int offset. Note that this means that a glyph item is bound to a TextGeometry
         self.offset = 0
 
+class TextMultiPartGeometry(Geometry):
+    def __init__(self, text_geometries, anchors):
+        super().__init__()
+        self._store.text_geometries = text_geometries
+        self._store.text_anchors = anchors
+
+        nitems = sum(g.indices.nitems for g in text_geometries)
+
+        self.indices = Buffer(np.zeros((nitems,), np.uint32))
+        self.positions = Buffer(np.zeros((nitems, 2), np.float32))
+        self.sizes = Buffer(np.zeros((nitems,), np.float32))
+        i = 0
+        for g, a in zip(text_geometries, anchors):
+            nitems = g.indices.nitems
+            self.indices.data[i:i + nitems] = g.indices.data
+            self.positions.data[i:i + nitems] = g.positions.data + a
+            self.sizes.data[i:i + nitems] = g.sizes.data
+            i += nitems
+
+        self.indices.update_range(0, nitems)
+        self.positions.update_range(0, nitems)
+        self.sizes.update_range(0, nitems)
+
+    @property
+    def text_geometries(self):
+        return self._store.text_geometries
+
+    @property
+    def anchors(self):
+        return self._store.text_anchors
+
+    @property
+    def screen_space(self):
+        text_geometries = self.text_geometries
+        if len(text_geometries):
+            return text_geometries[0].screen_space
+        else:
+            return False
+
+    @property
+    def ref_glyph_size(self):
+        text_geometries = self.text_geometries
+        if len(text_geometries):
+            return text_geometries[0].ref_glyph_size
+        else:
+            return 48
 
 class TextGeometry(Geometry):
     """Geometry specific for representing text.

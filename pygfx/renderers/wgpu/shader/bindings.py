@@ -100,6 +100,8 @@ class BindingDefinitions:
 
     def _define_buffer(self, bindgroup, index, binding):
         # Get format, and split in the scalar part and the number of channels
+        if binding.resource is None:
+            import ipdb; ipdb.set_trace()
         fmt = to_vertex_format(binding.resource.format)
         if "x" in fmt:
             fmt_scalar, _, nchannels = fmt.partition("x")

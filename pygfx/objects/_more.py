@@ -374,3 +374,64 @@ class Text(WorldObject):
         # text in screen coordinates.
         matrix = la.mat_compose((0, 0, 0), self.local.rotation, self.local.scale)
         self.uniform_buffer.data["rot_scale_transform"] = matrix.T
+
+
+class TextMultiPart(WorldObject):
+    """A text.
+
+    See :class:``pygfx.TextGeometry`` for details.
+
+    Parameters
+    ----------
+    geometry : TextMultiGeometry
+        The data defining the glyphs that make up the text.
+    material : Material
+        The data defining the appearance of the object.
+    visible : bool
+        Whether the object is visible.
+    render_order : int
+        The render order (when applicable for the renderer's blend mode).
+    render_mask : str
+        Determines the render passes that the object is rendered in. It's
+        recommended to let the renderer decide, using "auto".
+    position : Vector
+        The position of the object in the world. Default (0, 0, 0).
+
+    """
+
+    uniform_type = dict(
+        WorldObject.uniform_type,
+        rot_scale_transform="4x4xf4",
+    )
+
+    def __init__(
+        self,
+        geometry=None,
+        material=None,
+        *,
+        visible=True,
+        render_order=0,
+        render_mask="auto",
+    ):
+        super().__init__(
+            geometry,
+            material,
+            visible=visible,
+            render_order=render_order,
+            render_mask=render_mask,
+        )
+
+        # calling super from callback is possible, but slow so we register it as a second callback instead
+        self.world.on_update(super()._update_uniform_buffers)
+
+    @callback
+    def _update_uniform_buffers(self, transform: AffineBase):
+        # super()._update_uniform_buffers(transform)
+        # When rendering in screen space, the world transform is used
+        # to establish the point in the scene where the text is placed.
+        # The only part of the local transform that is used is the
+        # position. Therefore, we also keep a transform containing the
+        # local rotation and scale, so that these can be applied to the
+        # text in screen coordinates.
+        matrix = la.mat_compose((0, 0, 0), self.local.rotation, self.local.scale)
+        self.uniform_buffer.data["rot_scale_transform"] = matrix.T

@@ -1,6 +1,6 @@
 import wgpu  # only for flags/enums
 
-from ....objects import Text
+from ....objects import Text, TextMultiPart
 from ....materials import TextMaterial
 
 from .. import (
