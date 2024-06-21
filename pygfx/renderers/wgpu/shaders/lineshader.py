@@ -15,6 +15,7 @@ from ....materials._line import (
     LineThinMaterial,
     LineThinSegmentMaterial,
     LineDebugMaterial,
+    LineSDFMaterial,
 )
 
 from .. import (
@@ -270,6 +271,12 @@ class LineShader(BaseShader):
 
     def get_code(self):
         return load_wgsl("line.wgsl")
+
+
+@register_wgpu_render_function(Line, LineSDFMaterial)
+class LineDebugShader(LineShader):
+    def __init__(self, wobject):
+        super().__init__(wobject)
 
 
 @register_wgpu_render_function(Line, LineDebugMaterial)
