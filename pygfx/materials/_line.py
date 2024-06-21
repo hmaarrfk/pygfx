@@ -282,3 +282,7 @@ class LineThinSegmentMaterial(LineMaterial):
     useful for debugging as it is more performant than other line materials.
 
     """
+
+
+class LineSDFMaterial(LineMaterial):
+    """A line material that uses a signed distance field to render the line."""
