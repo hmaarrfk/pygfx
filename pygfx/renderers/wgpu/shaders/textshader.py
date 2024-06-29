@@ -41,6 +41,35 @@ class TextShader(BaseShader):
             Binding("s_sizes", sbuffer, geometry.sizes, "VERTEX"),
         ]
 
+        if (anchor_positions := getattr(geometry, 'anchor_positions', None)) is not None:
+            import ipdb; ipdb.set_trace()
+            bindings.append(Binding("s_anchor_positions", sbuffer, anchor_positions, "VERTEX"))
+            self["n_anchors"] = len(anchor_positions.data)
+            self["dynamic_anchor"] = True
+            if geometry.anchor == "top-right":
+                self["anchor_vector"] = "vec2(1.0, 1.0)"
+            elif geometry.anchor == "bottom-left":
+                self["anchor_vector"] = "vec2(-1.0, -1.0)"
+            elif geometry.anchor == "bottom-right":
+                self["anchor_vector"] = "vec2(1.0, -1.0)"
+            elif geometry.anchor == "top-left":
+                self["anchor_vector"] = "vec2(-1.0, 1.0)"
+            elif geometry.anchor == "top-middle":
+                self["anchor_vector"] = "vec2(0.0, 1.0)"
+            elif geometry.anchor == "middle-left":
+                self["anchor_vector"] = "vec2(-1.0, 0.0)"
+            elif geometry.anchor == "middle-right":
+                self["anchor_vector"] = "vec2(1.0, 0.0)"
+            elif geometry.anchor == "middle-middle":
+                self["anchor_vector"] = "vec2(0.0, 0.0)"
+            elif geometry.anchor == "bottom-middle":
+                self["anchor_vector"] = "vec2(0.0, -1.0)"
+            else:
+                self["anchor_vector"] = "vec2(0.0, 0.0)"
+        else:
+            self["dynamic_anchor"] = False
+
+
         tex = shared.glyph_atlas_texture
         sampler = GfxSampler("linear", "clamp")
         tex_view = GfxTextureView(tex)
