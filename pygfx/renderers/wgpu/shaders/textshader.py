@@ -42,10 +42,8 @@ class TextShader(BaseShader):
         ]
 
         if (anchor_positions := getattr(geometry, 'anchor_positions', None)) is not None:
-            import ipdb; ipdb.set_trace()
             bindings.append(Binding("s_anchor_positions", sbuffer, anchor_positions, "VERTEX"))
-            self["n_anchors"] = len(anchor_positions.data)
-            self["dynamic_anchor"] = True
+            self["n_dynamic_anchors"] = len(anchor_positions.data)
             if geometry.anchor == "top-right":
                 self["anchor_vector"] = "vec2(1.0, 1.0)"
             elif geometry.anchor == "bottom-left":
@@ -67,7 +65,7 @@ class TextShader(BaseShader):
             else:
                 self["anchor_vector"] = "vec2(0.0, 0.0)"
         else:
-            self["dynamic_anchor"] = False
+            self["n_dynamic_anchors"] = 0
 
 
         tex = shared.glyph_atlas_texture
