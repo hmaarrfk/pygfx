@@ -985,7 +985,9 @@ class TextGeometry(Geometry):
         * Vertical values: "top", "middle", "baseline", "bottom".
         * Horizontal values: "left", "center", "right".
         """
-        return self._store.anchor
+        # Do not alias anchor otherwise the geometry.__setattr__
+        # will take over the property setter
+        return self._store.the_anchor
 
     @anchor.setter
     def anchor(self, anchor):
@@ -1015,7 +1017,9 @@ class TextGeometry(Geometry):
         except KeyError:
             raise ValueError(f"Invalid anchor value '{anchor}'")
         # Apply
-        self._store.anchor = f"{anchory}-{anchorx}"
+        # Do not alias anchor otherwise the geometry.__setattr__
+        # will take over the property setter
+        self._store.the_anchor = anchor
         self.apply_layout()
 
     @property

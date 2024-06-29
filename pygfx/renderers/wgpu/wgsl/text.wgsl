@@ -78,9 +78,9 @@ fn vs_main(in: VertexInput) -> Varyings {
         var world_pos = u_wobject.world_transform * vec4<f32>(raw_pos, 1.0);
         var ndc_pos = u_stdinfo.projection_transform * u_stdinfo.cam_transform * world_pos;
 
-        $$ if dynamic_anchor
+        $$ if n_dynamic_anchors
         let desired_direction = {{ anchor_vector }} * screen_factor;
-        for (var i = 0; i < {{ n_anchors }}; i = i + 1) {
+        for (var i = 0; i < {{ n_dynamic_anchors }}; i = i + 1) {
             let candidate_pos =
                 u_stdinfo.projection_transform *
                 u_stdinfo.cam_transform *
@@ -88,11 +88,13 @@ fn vs_main(in: VertexInput) -> Varyings {
                 vec4<f32>(load_s_anchor_positions(i), 1.0)
             ;
 
+            let better_candidate =
+                dot(candidate_pos.xy, desired_direction) >
+                dot(ndc_pos.xy, desired_direction);
             ndc_pos = select(
                 ndc_pos,
                 candidate_pos,
-                dot(candidate_pos.xy, desired_direction) >
-                dot(ndc_pos.xy, desired_direction)
+                better_candidate
             );
         }
         $$ endif
