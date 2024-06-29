@@ -229,8 +229,15 @@ class TextGeometry(Geometry):
         text_align_last="auto",
         family=None,
         direction=None,
+        anchor_positions=None,
     ):
-        super().__init__()
+        if anchor_positions is not None:
+            geometry_args = dict(
+                anchor_positions=anchor_positions,
+            )
+        else:
+            geometry_args = {}
+        super().__init__(**geometry_args)
 
         # Init stub buffers
         self.indices = None
@@ -637,7 +644,7 @@ class TextGeometry(Geometry):
         # We try to follow CSS  which multiplies the line_height by the font_size as well
         line_height = self.line_height * font_size
 
-        anchor = self._anchor
+        anchor = self.anchor
         text_align = self._text_align
         text_align_last = self._text_align_last
         if text_align_last == "auto":
@@ -978,7 +985,7 @@ class TextGeometry(Geometry):
         * Vertical values: "top", "middle", "baseline", "bottom".
         * Horizontal values: "left", "center", "right".
         """
-        return self._anchor
+        return self._store.anchor
 
     @anchor.setter
     def anchor(self, anchor):
@@ -1008,7 +1015,7 @@ class TextGeometry(Geometry):
         except KeyError:
             raise ValueError(f"Invalid anchor value '{anchor}'")
         # Apply
-        self._anchor = f"{anchory}-{anchorx}"
+        self._store.anchor = f"{anchory}-{anchorx}"
         self.apply_layout()
 
     @property
