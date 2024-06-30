@@ -165,6 +165,8 @@ def change_justify(event):
         text.geometry.font_size *= 1.1
     elif event.key == "g":
         text.geometry.font_size /= 1.1
+    elif event.key == "p":
+        text.geometry.clamp_to_screen = not text.geometry.clamp_to_screen
     elif event.key in ["ArrowRight", "ArrowLeft"]:
         if event.key == "ArrowRight":
             angle = 5
@@ -189,11 +191,11 @@ def change_justify(event):
         print(f"Ignoring key {event.key}")
         return
 
-
     print(f"Anchor: {text.geometry.anchor}")
     print(f"Text align: {text.geometry.text_align}")
     print(f"Text align last: {text.geometry.text_align_last}")
     print(f"Font size: {text.geometry.font_size}")
+    print(f"Clamp to screen: {text.geometry.clamp_to_screen}")
 
     renderer.request_draw()
 
@@ -231,6 +233,7 @@ Use
 * l to set the alignment of the last line to justify.
 * f to increase the font size.
 * g to decrease the font size.
+* p to toggle screen clamping.
 
 """
 )
