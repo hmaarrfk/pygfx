@@ -165,8 +165,16 @@ def change_justify(event):
         text.geometry.font_size *= 1.1
     elif event.key == "g":
         text.geometry.font_size /= 1.1
-    elif event.key == "p":
+    elif event.key == "y":
         text.geometry.clamp_to_screen = not text.geometry.clamp_to_screen
+    elif event.key == "t":
+        anchor_positions = text.geometry.anchor_positions
+        if anchor_positions is not None:
+            text.geometry.anchor_positions = None
+        else:
+            text.geometry.anchor_positions = gfx.Buffer(
+                points.geometry.positions.data[1:]
+            )
     elif event.key in ["ArrowRight", "ArrowLeft"]:
         if event.key == "ArrowRight":
             angle = 5
@@ -180,6 +188,7 @@ def change_justify(event):
         ], dtype=np.float32)
 
         # Rotate the anchor position
+        positions = points.geometry.positions.data
         new_positions = positions @ rotation
         if (anchor_positions := getattr(text.geometry, "anchor_positions", None)) is not None:
             anchor_positions.data[...] = new_positions[:1]
@@ -233,7 +242,8 @@ Use
 * l to set the alignment of the last line to justify.
 * f to increase the font size.
 * g to decrease the font size.
-* p to toggle screen clamping.
+* y to toggle screen clamping.
+* t to toggle multiple anchors.
 
 """
 )
