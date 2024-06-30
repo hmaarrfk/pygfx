@@ -230,6 +230,7 @@ class TextGeometry(Geometry):
         family=None,
         direction=None,
         anchor_positions=None,
+        clamp_to_screen=False,
     ):
         if anchor_positions is not None:
             geometry_args = dict(
@@ -243,6 +244,7 @@ class TextGeometry(Geometry):
         self.indices = None
         self.positions = None
         self.sizes = None
+        self.clamp_to_screen = clamp_to_screen
 
         # Init props unrelated to layout
         self.screen_space = screen_space
@@ -300,6 +302,14 @@ class TextGeometry(Geometry):
     @screen_space.setter
     def screen_space(self, value):
         self._store.screen_space = bool(value)
+
+    @property
+    def clamp_to_screen(self):
+        return self._store.clamp_to_screen
+
+    @clamp_to_screen.setter
+    def clamp_to_screen(self, value):
+        self._store.clamp_to_screen = bool(value)
 
     def set_text_items(self, text_items):
         """Update the text using one or more TextItems.
