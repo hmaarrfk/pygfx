@@ -70,20 +70,6 @@ positions = np.asarray([
     [0, -1.0001, 0],
 ], dtype=np.float32)
 
-text = gfx.Text(
-    gfx.TextGeometry(
-        text=text,
-        font_size=40,
-        screen_space=True,
-        text_align="center",
-        anchor="middle-middle",
-        direction=direction,
-        anchor_positions=positions[1:],
-        clamp_to_screen=True,
-    ),
-    gfx.TextMaterial(color="#B4F8C8", outline_color="#000", outline_thickness=0.15),
-)
-
 colors = [
     (1, 0, 0, 1),
     (0, 1, 0, 1),
@@ -106,6 +92,20 @@ points = gfx.Points(
         size=10,
         color_mode="vertex",
     ),
+)
+
+text = gfx.Text(
+    gfx.TextGeometry(
+        text=text,
+        font_size=40,
+        screen_space=True,
+        text_align="center",
+        anchor="middle-middle",
+        direction=direction,
+        anchor_positions=points.geometry.positions,
+        clamp_to_screen=True,
+    ),
+    gfx.TextMaterial(color="#B4F8C8", outline_color="#000", outline_thickness=0.15),
 )
 
 scene.add(text, points)
@@ -172,9 +172,9 @@ def change_justify(event):
         if anchor_positions is not None:
             text.geometry.anchor_positions = None
         else:
-            text.geometry.anchor_positions = gfx.Buffer(
-                points.geometry.positions.data[1:]
-            )
+            # Share the same buffer, so we only need to update one
+            # of them
+            text.geometry.anchor_positions = points.geometry.positions
     elif event.key in ["ArrowRight", "ArrowLeft"]:
         if event.key == "ArrowRight":
             angle = 5
@@ -190,10 +190,6 @@ def change_justify(event):
         # Rotate the anchor position
         positions = points.geometry.positions.data
         new_positions = positions @ rotation
-        if (anchor_positions := getattr(text.geometry, "anchor_positions", None)) is not None:
-            anchor_positions.data[...] = new_positions[:1]
-            anchor_positions.update_range()
-
         points.geometry.positions.data[...] = new_positions
         points.geometry.positions.update_range()
     else:
