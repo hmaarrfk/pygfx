@@ -57,35 +57,63 @@ else:
 
 print(f"========= Text =========\n{text}\n========================")
 
+import numpy as np
+positions = np.asarray([
+    [0, 0, 0],
+    [1, 1, 0],
+    [-1, 1, 0],
+    [-1, -1, 0],
+    [1, -1, 0],
+    [1.0001, 0, 0],
+    [0, 1.0001, 0],
+    [-1.0001, 0, 0],
+    [0, -1.0001, 0],
+], dtype=np.float32)
+
 text = gfx.Text(
     gfx.TextGeometry(
         text=text,
         font_size=40,
         screen_space=True,
         text_align="center",
-        anchor="middle-center",
+        anchor="middle-middle",
         direction=direction,
+        anchor_positions=positions[1:],
+        clamp_to_screen=True,
     ),
     gfx.TextMaterial(color="#B4F8C8", outline_color="#000", outline_thickness=0.15),
 )
-text.local.position = (0, 0, 0)
+
+colors = [
+    (1, 0, 0, 1),
+    (0, 1, 0, 1),
+    (0, 0, 1, 1),
+    (1, 1, 0, 1),
+    (0, 1, 1, 1),
+    (1, 0, 1, 1),
+    (1, 1, 1, 1),
+    (0, 0, 0, 1),
+    (0.5, 0.5, 0.5, 1),
+]
 
 points = gfx.Points(
     gfx.Geometry(
-        positions=[
-            text.local.position,
-        ],
+        positions=positions,
+        colors=colors,
     ),
-    gfx.PointsMaterial(color="#f00", size=10),
+    gfx.PointsMaterial(
+        color="#f00",
+        size=10,
+        color_mode="vertex",
+    ),
 )
 
 scene.add(text, points)
-
-camera = gfx.OrthographicCamera(4, 3)
-
-
 renderer = gfx.renderers.WgpuRenderer(WgpuCanvas(size=(800, 600)))
 
+camera = gfx.PerspectiveCamera(70)
+camera.show_object(scene)
+controller = gfx.OrbitController(camera, register_events=renderer)
 
 @renderer.add_event_handler("key_down")
 def change_justify(event):
@@ -137,6 +165,30 @@ def change_justify(event):
         text.geometry.font_size *= 1.1
     elif event.key == "g":
         text.geometry.font_size /= 1.1
+    elif event.key in ["ArrowRight", "ArrowLeft"]:
+        if event.key == "ArrowRight":
+            angle = 5
+        else:
+            angle = -5
+        # Create a 5 degree rotation matrix around the z axis
+        rotation = np.asarray([
+            [np.cos(angle * np.pi / 180), -np.sin(angle * np.pi / 180), 0],
+            [np.sin(angle * np.pi / 180), np.cos(angle * np.pi / 180), 0],
+            [0, 0, 1],
+        ], dtype=np.float32)
+
+        # Rotate the anchor position
+        new_positions = positions @ rotation
+        if (anchor_positions := getattr(text.geometry, "anchor_positions", None)) is not None:
+            anchor_positions.data[...] = new_positions[:1]
+            anchor_positions.update_range()
+
+        points.geometry.positions.data[...] = new_positions
+        points.geometry.positions.update_range()
+    else:
+        print(f"Ignoring key {event.key}")
+        return
+
 
     print(f"Anchor: {text.geometry.anchor}")
     print(f"Text align: {text.geometry.text_align}")

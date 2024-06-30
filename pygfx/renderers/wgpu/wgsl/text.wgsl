@@ -76,10 +76,19 @@ fn vs_main(in: VertexInput) -> Varyings {
 
         let raw_pos = vec3<f32>(0.0, 0.0, 0.0);
         var world_pos = u_wobject.world_transform * vec4<f32>(raw_pos, 1.0);
-        var ndc_pos = u_stdinfo.projection_transform * u_stdinfo.cam_transform * world_pos;
 
-        $$ if n_dynamic_anchors
+        $$ if n_dynamic_anchors < 1
+        // is WGSL smart enough to optimize var -> let when the particular variable dosesn't
+        // change in the scope???
+        let ndc_pos = u_stdinfo.projection_transform * u_stdinfo.cam_transform * world_pos;
+        $$ else
+        var ndc_pos = u_stdinfo.projection_transform * u_stdinfo.cam_transform * world_pos;
         let desired_direction = {{ anchor_vector }} * screen_factor;
+        var best_score = dot(ndc_pos.xy / ndc_pos.w, desired_direction);
+        $$ if clamp_to_screen
+        var worst_score = best_score;
+        var worst_ndc_pos = ndc_pos;
+        $$ endif
         for (var i = 0; i < {{ n_dynamic_anchors }}; i = i + 1) {
             let candidate_pos =
                 u_stdinfo.projection_transform *
@@ -87,16 +96,57 @@ fn vs_main(in: VertexInput) -> Varyings {
                 u_wobject.world_transform *
                 vec4<f32>(load_s_anchor_positions(i), 1.0)
             ;
-
-            let better_candidate =
-                dot(candidate_pos.xy, desired_direction) >
-                dot(ndc_pos.xy, desired_direction);
+            // I'm trying to ensure that the text stays within the screen if it can.
+            let screen_pos = candidate_pos.xy / candidate_pos.w;
+            let current_score = dot(screen_pos, desired_direction);
             ndc_pos = select(
                 ndc_pos,
                 candidate_pos,
-                better_candidate
+                current_score > best_score
             );
+            best_score = max(best_score, current_score);
+        $$ if clamp_to_screen
+            worst_ndc_pos = select(
+                worst_ndc_pos,
+                candidate_pos,
+                current_score < worst_score
+            );
+            worst_score = min(worst_score, current_score);
+        $$ endif
         }
+        $$ if clamp_to_screen
+        ndc_pos = vec4<f32>(
+            clamp(
+                ndc_pos.xy, vec2<f32>(-ndc_pos.w), vec2<f32>(ndc_pos.w)
+            ),
+            ndc_pos.zw
+        );
+
+        let new_screen_pos = ndc_pos.xy / ndc_pos.w;
+        let worst_screen_pos = worst_ndc_pos.xy / worst_ndc_pos.w;
+        ndc_pos = vec4<f32>(
+            select(
+                ndc_pos.x,
+                worst_screen_pos.x * ndc_pos.w,
+                min(
+                    new_screen_pos.x * worst_screen_pos.x,
+                    abs(new_screen_pos.x * 1.001),
+                ) > 1.
+
+            ),
+            select(
+                ndc_pos.y,
+                worst_screen_pos.y * ndc_pos.w,
+                min(
+                    new_screen_pos.y * worst_screen_pos.y,
+                    abs(new_screen_pos.y * 1.001),
+                ) > 1.
+            ),
+            ndc_pos.zw
+        );
+        // clamp_to_screen
+        $$ endif
+        // n_dynamic_anchors
         $$ endif
 
         let vertex_pos_rotated_and_scaled = u_wobject.rot_scale_transform * vec4<f32>(
