@@ -48,6 +48,8 @@ class TextShader(BaseShader):
             anchor != "middle-middle" and
             anchor_positions is not None
         ):
+            bindings.append(Binding("u_geometry", "buffer/uniform", geometry.uniform_buffer))
+
             bindings.append(Binding("s_anchor_positions", sbuffer, anchor_positions, "VERTEX"))
             self["n_dynamic_anchors"] = len(anchor_positions.data)
             if geometry.anchor == "top-right":

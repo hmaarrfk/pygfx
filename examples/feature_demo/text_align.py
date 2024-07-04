@@ -111,7 +111,8 @@ text = gfx.Text(
         outline_thickness=0.15,
         # This should probably be in the geometry???
         # And it should be related to the font???
-        ndc_text_limits=(.7, 0.5, -0.9, -.8),
+        # ndc_text_limits=(.7, 0.5, -0.9, -.8),
+        text_boundary=(20, 20, 20, 20),
     ),
 )
 

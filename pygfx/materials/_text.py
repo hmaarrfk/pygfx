@@ -40,6 +40,7 @@ class TextMaterial(Material):
         outline_thickness="f4",
         outline_color="4xf4",
         ndc_text_limits="4xf4",
+        text_boundary="4xf4",
     )
 
     def __init__(
@@ -51,6 +52,7 @@ class TextMaterial(Material):
         weight_offset=0,
         aa=True,
         ndc_text_limits=(1., 1., -1., -1.),
+        text_boundary=(0., 0., 0., 0.),
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -61,6 +63,7 @@ class TextMaterial(Material):
         self.weight_offset = weight_offset
         self.aa = aa
         self.ndc_text_limits = ndc_text_limits
+        self.text_boundary = text_boundary
 
     def _wgpu_get_pick_info(self, pick_value):
         # Note that the glyph index is not necessarily the same as the
@@ -159,4 +162,17 @@ class TextMaterial(Material):
             raise ValueError("Must provide a 4 length object")
 
         self.uniform_buffer.data["ndc_text_limits"][...] = value
+        self.uniform_buffer.update_range(0, 1)
+
+    @property
+    def text_boundary(self):
+        data = self.uniform_buffer.data["text_boundary"]
+        return float(data[0]), float(data[1]), float(data[2]), float(data[3])
+
+    @text_boundary.setter
+    def text_boundary(self, value):
+        if len(value) != 4:
+            raise ValueError("Must provide a 4 length object")
+
+        self.uniform_buffer.data["text_boundary"][...] = value
         self.uniform_buffer.update_range(0, 1)

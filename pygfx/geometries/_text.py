@@ -11,6 +11,7 @@ import numpy as np
 from ..resources import Buffer
 from ..utils import text as textmodule
 from ._base import Geometry
+from ..utils import array_from_shadertype
 
 _TEXT_ALIGNMENTS = [
     "start",
@@ -214,6 +215,9 @@ class TextGeometry(Geometry):
 
     """
 
+    uniform_type = dict(
+        text_extents="4xf4",
+    )
     def __init__(
         self,
         text=None,
@@ -239,6 +243,8 @@ class TextGeometry(Geometry):
         else:
             geometry_args = {}
         super().__init__(**geometry_args)
+        self._store.uniform_buffer = Buffer(array_from_shadertype(self.uniform_type))
+
 
         # Init stub buffers
         self.indices = None
@@ -876,6 +882,10 @@ class TextGeometry(Geometry):
         # Trigger uploads to GPU
         self.sizes.update_range(0, i2)
         self.positions.update_range(0, i2)
+
+        self.uniform_buffer.data["text_extents"][...] = (left, bottom, right, top)
+        self.uniform_buffer.update_range(0, 1)
+
 
     def apply_layout(self):
         """Update the internal contained glyphs.
