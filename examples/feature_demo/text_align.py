@@ -105,7 +105,14 @@ text = gfx.Text(
         anchor_positions=points.geometry.positions,
         clamp_to_screen=True,
     ),
-    gfx.TextMaterial(color="#B4F8C8", outline_color="#000", outline_thickness=0.15),
+    gfx.TextMaterial(
+        color="#B4F8C8",
+        outline_color="#000",
+        outline_thickness=0.15,
+        # This should probably be in the geometry???
+        # And it should be related to the font???
+        ndc_text_limits=(.7, 0.5, -0.9, -.8),
+    ),
 )
 
 scene.add(text, points)

@@ -115,35 +115,28 @@ fn vs_main(in: VertexInput) -> Varyings {
         $$ endif
         }
         $$ if clamp_to_screen
-        ndc_pos = vec4<f32>(
-            clamp(
-                ndc_pos.xy, vec2<f32>(-ndc_pos.w), vec2<f32>(ndc_pos.w)
-            ),
-            ndc_pos.zw
-        );
 
         let new_screen_pos = ndc_pos.xy / ndc_pos.w;
         let worst_screen_pos = worst_ndc_pos.xy / worst_ndc_pos.w;
-        ndc_pos = vec4<f32>(
-            select(
-                ndc_pos.x,
-                worst_screen_pos.x * ndc_pos.w,
-                min(
-                    new_screen_pos.x * worst_screen_pos.x,
-                    abs(new_screen_pos.x * 1.001),
-                ) > 1.
+        $$ if anchor_y == "top"
+        if (new_screen_pos.y > u_material.ndc_text_limits.y){
+            ndc_pos.y = ndc_pos.w * max(worst_screen_pos.y, u_material.ndc_text_limits.y);
+        }
+        $$ elif anchor_y == "bottom"
+        if (new_screen_pos.y < u_material.ndc_text_limits.w) {
+            ndc_pos.y = ndc_pos.w * min(worst_screen_pos.y, u_material.ndc_text_limits.w);
+        }
+        $$ endif
 
-            ),
-            select(
-                ndc_pos.y,
-                worst_screen_pos.y * ndc_pos.w,
-                min(
-                    new_screen_pos.y * worst_screen_pos.y,
-                    abs(new_screen_pos.y * 1.001),
-                ) > 1.
-            ),
-            ndc_pos.zw
-        );
+        $$ if anchor_x == "right"
+        if (new_screen_pos.x > u_material.ndc_text_limits.x) {
+            ndc_pos.x =  ndc_pos.w * max(worst_screen_pos.x, u_material.ndc_text_limits.x);
+        }
+        $$ elif anchor_x == "left"
+        if (new_screen_pos.x < u_material.ndc_text_limits.z) {
+            ndc_pos.x =  ndc_pos.w * min(worst_screen_pos.x, u_material.ndc_text_limits.z);
+        }
+        $$ endif
         // clamp_to_screen
         $$ endif
         // n_dynamic_anchors

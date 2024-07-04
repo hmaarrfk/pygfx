@@ -41,7 +41,13 @@ class TextShader(BaseShader):
             Binding("s_sizes", sbuffer, geometry.sizes, "VERTEX"),
         ]
 
-        if (anchor_positions := getattr(geometry, 'anchor_positions', None)) is not None:
+        anchor = geometry.anchor
+        anchor_positions = getattr(geometry, 'anchor_positions', None)
+        if (
+            # I don't really know a good vector for the "middle"
+            anchor != "middle-middle" and
+            anchor_positions is not None
+        ):
             bindings.append(Binding("s_anchor_positions", sbuffer, anchor_positions, "VERTEX"))
             self["n_dynamic_anchors"] = len(anchor_positions.data)
             if geometry.anchor == "top-right":
@@ -58,8 +64,6 @@ class TextShader(BaseShader):
                 self["anchor_vector"] = "vec2(-1.0, 0.0)"
             elif geometry.anchor == "middle-right":
                 self["anchor_vector"] = "vec2(1.0, 0.0)"
-            elif geometry.anchor == "middle-middle":
-                self["anchor_vector"] = "vec2(0.0, 0.0)"
             elif geometry.anchor == "bottom-middle":
                 self["anchor_vector"] = "vec2(0.0, -1.0)"
             else:
@@ -70,6 +74,7 @@ class TextShader(BaseShader):
                 # chosen point
                 self["anchor_vector"] = "vec2(0.0, 0.0)"
             self["clamp_to_screen"] = geometry.clamp_to_screen
+            self["anchor_y"], self["anchor_x"] = anchor.split("-")
         else:
             self["n_dynamic_anchors"] = 0
             self["clamp_to_screen"] = geometry.clamp_to_screen
