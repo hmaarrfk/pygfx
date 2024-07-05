@@ -130,7 +130,7 @@ fn vs_main(in: VertexInput) -> Varyings {
         $$ elif anchor_y == "bottom"
         let limit_y = max(
             u_material.ndc_text_limits.w,
-            -(screen_factor.y - u_material.text_boundary.w) / screen_factor.x
+            -(screen_factor.y - u_material.text_boundary.w) / screen_factor.y
         );
         if (new_screen_pos.y < limit_y) {
             ndc_pos.y = ndc_pos.w * min(max(worst_screen_pos.y - ndc_text_extent.y, new_screen_pos.y), limit_y);
