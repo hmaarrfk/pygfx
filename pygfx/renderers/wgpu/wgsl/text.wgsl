@@ -138,7 +138,7 @@ fn vs_main(in: VertexInput) -> Varyings {
             ndc_pos.y,
             ndc_pos.w * min(max(worst_screen_pos.y - ndc_text_extent.y, new_screen_pos.y), limit_y),
             new_screen_pos.y < limit_y
-        )
+        );
         $$ endif
 
         $$ if anchor_x == "right"
