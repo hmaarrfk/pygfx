@@ -112,7 +112,7 @@ text = gfx.Text(
         # This should probably be in the geometry???
         # And it should be related to the font???
         # ndc_text_limits=(.7, 0.5, -0.9, -.8),
-        text_boundary=(20, 20, 20, 20),
+        screen_padding=(20, 20, 20, 20),
     ),
 )
 

@@ -122,37 +122,45 @@ fn vs_main(in: VertexInput) -> Varyings {
         $$ if anchor_y == "top"
         let limit_y = min(
             u_material.ndc_text_limits.y,
-            (screen_factor.y - u_material.text_boundary.y) / screen_factor.y
+            (screen_factor.y - u_material.screen_padding.y) / screen_factor.y
         );
-        if (new_screen_pos.y > limit_y){
-            ndc_pos.y = ndc_pos.w * max(min(worst_screen_pos.y + ndc_text_extent.y, new_screen_pos.y), limit_y);
-        }
+        ndc_pos.y = select(
+            ndc_pos.y,
+            ndc_pos.w * max(min(worst_screen_pos.y + ndc_text_extent.y, new_screen_pos.y), limit_y),
+            new_screen_pos.y > limit_y
+        );
         $$ elif anchor_y == "bottom"
         let limit_y = max(
             u_material.ndc_text_limits.w,
-            -(screen_factor.y - u_material.text_boundary.w) / screen_factor.y
+            -(screen_factor.y - u_material.screen_padding.w) / screen_factor.y
         );
-        if (new_screen_pos.y < limit_y) {
-            ndc_pos.y = ndc_pos.w * min(max(worst_screen_pos.y - ndc_text_extent.y, new_screen_pos.y), limit_y);
-        }
+        ndc_pos.y = select(
+            ndc_pos.y,
+            ndc_pos.w * min(max(worst_screen_pos.y - ndc_text_extent.y, new_screen_pos.y), limit_y),
+            new_screen_pos.y < limit_y
+        )
         $$ endif
 
         $$ if anchor_x == "right"
         let limit_x = min(
             u_material.ndc_text_limits.x,
-            (screen_factor.x - u_material.text_boundary.x) / screen_factor.x
+            (screen_factor.x - u_material.screen_padding.x) / screen_factor.x
         );
-        if (new_screen_pos.x > limit_x) {
-            ndc_pos.x =  ndc_pos.w * max(min(worst_screen_pos.x + ndc_text_extent.x, new_screen_pos.x), limit_x);
-        }
+        ndc_pos.x = select(
+            ndc_pos.x,
+            ndc_pos.w * max(min(worst_screen_pos.x + ndc_text_extent.x, new_screen_pos.x), limit_x),
+            new_screen_pos.x > limit_x
+        );
         $$ elif anchor_x == "left"
         let limit_x = max(
             u_material.ndc_text_limits.z,
-            -(screen_factor.x - u_material.text_boundary.z) / screen_factor.x
+            -(screen_factor.x - u_material.screen_padding.z) / screen_factor.x
         );
-        if (new_screen_pos.x < limit_x) {
-            ndc_pos.x =  ndc_pos.w * min(max(worst_screen_pos.x - ndc_text_extent.x, new_screen_pos.x), limit_x);
-        }
+        ndc_pos.x = select(
+            ndc_pos.x,
+            ndc_pos.w * min(max(worst_screen_pos.x - ndc_text_extent.x, new_screen_pos.x), limit_x),
+            new_screen_pos.x < limit_x
+        );
         $$ endif
         // clamp_to_screen
         $$ endif
