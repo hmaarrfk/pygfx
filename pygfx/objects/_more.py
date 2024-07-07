@@ -22,8 +22,9 @@ class Group(WorldObject):
 
     """
 
-    def __init__(self, *, visible=True):
+    def __init__(self, *, visible=True, name=""):
         super().__init__(visible=visible)
+        self.name = name
 
 
 class Scene(Group):
@@ -35,8 +36,8 @@ class Scene(Group):
 
     """
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
 
 class Background(WorldObject):
@@ -351,6 +352,7 @@ class Text(WorldObject):
         visible=True,
         render_order=0,
         render_mask="auto",
+        name="",
     ):
         super().__init__(
             geometry,
@@ -358,6 +360,7 @@ class Text(WorldObject):
             visible=visible,
             render_order=render_order,
             render_mask=render_mask,
+            name=name,
         )
 
         # calling super from callback is possible, but slow so we register it as a second callback instead

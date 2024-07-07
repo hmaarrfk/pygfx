@@ -114,16 +114,16 @@ class Geometry(Trackable):
             no finite positions.
 
         """
-        if hasattr(self, "positions"):
-            if self._aabb_rev == self.positions.rev:
+        if (positions := getattr(self, "positions", None)) is not None:
+            if self._aabb_rev == positions.rev:
                 return self._aabb
             aabb = None
             # Get positions and check expected shape
-            pos = self.positions.data
+            pos = positions.data
             if pos.ndim == 2 and pos.shape[1] in (2, 3):
                 # Select finite positions
                 finite_mask = np.isfinite(pos).all(axis=1)
-                if finite_mask.sum() > 0:
+                if finite_mask.any():
                     # Construct aabb
                     pos_finite = pos[finite_mask]
                     aabb = np.array(
@@ -133,26 +133,25 @@ class Geometry(Trackable):
                     if aabb.shape[1] == 2:
                         aabb = np.column_stack([aabb, np.zeros((2, 1), np.float32)])
             self._aabb = aabb
-            self._aabb_rev = self.positions.rev
+            self._aabb_rev = positions.rev
             return self._aabb
 
-        elif hasattr(self, "grid"):
-            if self._aabb_rev == self.grid.rev:
+        elif (grid := getattr(self, "grid", None)) is not None:
+            if self._aabb_rev == grid.rev:
                 return self._aabb
             # account for multi-channel image data
-            grid_shape = self.grid.data.shape[: self.grid.dim]
+            ndim = grid.dim
+            grid_shape = grid.data.shape[: ndim]
             # create aabb in index/data space
-            aabb = np.array([np.zeros_like(grid_shape), grid_shape[::-1]], dtype="f8")
+            aabb = np.zeros((2, 3), dtype=np.float32)
+            aabb[1, :ndim] = grid_shape[::-1]
+
             # convert to local image space by aligning
             # center of voxel index (0, 0, 0) with origin (0, 0, 0)
-            aabb -= 0.5
-            # ensure coordinates are 3D
-            # NOTE: important we do this last, we don't want to apply
-            # the -0.5 offset to the z-coordinate of 2D images
-            if aabb.shape[1] == 2:
-                aabb = np.hstack([aabb, [[0], [0]]])
+            # If we have a 2D grid, don't shift the z-axis
+            aabb -= (0.5,) * ndim + (0.,) * (3 - ndim)
             self._aabb = aabb
-            self._aabb_rev = self.grid.rev
+            self._aabb_rev = grid.rev
             return self._aabb
         else:
             return None

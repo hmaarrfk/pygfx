@@ -3,6 +3,7 @@ The main renderer class. This class wraps a canvas or texture and it
 manages the rendering process.
 """
 
+from collections import defaultdict
 import time
 import weakref
 
@@ -35,6 +36,66 @@ from .environment import get_environment
 from .shadowutil import render_shadow_maps
 from .mipmapsutil import generate_texture_mipmaps
 from .utils import GfxTextureView
+
+
+def compute_frustum_planes(frustum_points):
+    # Indices of the vertices for each face (bottom, top, four sides)
+    faces = [
+        (0, 2, 1, 3),  # Bottom face
+        # (4, 5, 6, 7),  # Top face
+        # (0, 1, 5, 4),  # Side face 1
+        # (1, 2, 6, 5),  # Side face 2
+        # (2, 3, 7, 6),  # Side face 3
+        # (3, 0, 4, 7)   # Side face 4
+    ]
+    planes = []
+    for face in faces:
+        p1 = frustum_points[face[0]]
+        p2 = frustum_points[face[1]]
+        p3 = frustum_points[face[2]]
+        v1 = p2 - p1
+        v2 = p3 - p1
+        normal = np.cross(v1, v2)
+        # Normalize the normal vector
+        normal = normal / np.linalg.norm(normal)
+        # Calculate D using the plane equation: normal · p1 + D = 0
+        D = -np.dot(normal, p1)
+        planes.append(np.append(normal, D))
+
+    return np.array(planes)
+
+def aabb_inside_frustum(aabb, frustum, frustum_planes):
+    # https://iquilezles.org/articles/frustumcorrect/
+
+    # bbox_points = np.asarray([
+    #     [aabb[0, 0], aabb[0, 1], aabb[0, 2], 1],
+    #     [aabb[1, 0], aabb[0, 1], aabb[0, 2], 1],
+    #     [aabb[1, 0], aabb[1, 1], aabb[0, 2], 1],
+    #     [aabb[0, 0], aabb[1, 1], aabb[0, 2], 1],
+    #     [aabb[0, 0], aabb[0, 1], aabb[1, 2], 1],
+    #     [aabb[1, 0], aabb[0, 1], aabb[1, 2], 1],
+    #     [aabb[1, 0], aabb[1, 1], aabb[1, 2], 1],
+    #     [aabb[0, 0], aabb[1, 1], aabb[1, 2], 1],
+    # ], dtype=aabb.dtype)
+
+    # Mark -- I'm not sure why you even need this loop?
+    # isn't the other check enough?
+    # Check if any point of the bounding box is outside the frustum
+    # for plane in frustum_planes:
+    #     # Check each point in the bounding box against this plane
+    #     if np.all(np.sum(plane * bbox_points, axis=1) < 0):
+    #         # All points are outside this plane
+    #         return False
+
+    # Check if all frustum points are outside of the box
+    if np.any(np.all(frustum < aabb[0], axis=0), axis=0):
+        return False
+
+    if np.any(np.all(frustum > aabb[1], axis=0), axis=0):
+        return False
+
+    return True
+
 
 
 def _get_sort_function(camera: Camera):
@@ -485,10 +546,52 @@ class WgpuRenderer(RootEventHandler, Renderer):
         environment = get_environment(self, scene)
 
         # Flatten the scenegraph, categorised by render_order
-        wobject_dict = {}
-        scene.traverse(
-            lambda ob: wobject_dict.setdefault(ob.render_order, []).append(ob), True
-        )
+        wobject_dict = defaultdict(list)
+        import time
+        start = time.perf_counter()
+        filter_count = {'value': 0}
+        if camera is None or getattr(camera, 'frustum', None) is None:
+            def filter_fn(ob, filter_count=filter_count):
+                filter_count['value'] += 1
+                return True
+        else:
+            frustum = camera.frustum.reshape(-1, 3)
+            frustum_planes = compute_frustum_planes(frustum)
+            def filter_fn(ob, filter_count=filter_count):
+                if not ob.frustum_culling:
+                    return True
+                filter_count['value'] += 1
+                if (geometry := ob.geometry) is None:
+                    return True
+
+                # Mod for Ramona
+                if getattr(ob, 'shape_mode', None) == "material":
+                    image_shape = ob.material.image_shape
+                    aabb = np.asarray([
+                        [0, 0, 0],
+                        [image_shape[1], image_shape[0], 0]
+                    ], dtype='float32')
+                else:
+                    aabb = geometry.get_bounding_box()
+                matrix = ob.world.matrix
+                # aabb_transform seems slow.... maybe we can optimize this
+                world_aabb = la.aabb_transform(aabb, matrix, dtype='float32')
+
+                return aabb_inside_frustum(
+                    world_aabb,
+                    frustum,
+                    frustum_planes=frustum_planes
+                )
+
+        all_objects = list(scene.iter(skip_invisible=True, filter_fn=filter_fn))
+        end = time.perf_counter()
+        print(f"Traversing the scene took {end-start:.4f} seconds {filter_count} objects filtered.")
+        start = end
+
+        for ob in all_objects:
+            wobject_dict[ob.render_order].append(ob)
+        end = time.perf_counter()
+        print(f"Flattening the scene took {time.perf_counter()-end:.4f} seconds")
 
         # Produce a sorted list of world objects
         wobject_list = []
@@ -638,7 +741,11 @@ class WgpuRenderer(RootEventHandler, Renderer):
             + environment.lights["directional_lights"]
         )
         render_shadow_maps(lights, wobject_list, command_encoder)
+        from time import perf_counter
 
+        start_time = perf_counter()
+
+        # import ipdb; ipdb.set_trace()
         for pass_index in range(blender.get_pass_count()):
             color_attachments = blender.get_color_attachments(pass_index)
             depth_attachment = blender.get_depth_attachment(pass_index)
@@ -653,12 +760,19 @@ class WgpuRenderer(RootEventHandler, Renderer):
             )
             render_pass.set_viewport(*physical_viewport)
 
-            for render_pipeline_container in render_pipeline_containers:
+            useful_containers = [
+                container
+                for container in render_pipeline_containers
+                if container.render_info["render_mask"] & render_mask != 0
+            ]
+            for render_pipeline_container in useful_containers:
                 render_pipeline_container.draw(
                     render_pass, environment, pass_index, render_mask
                 )
 
             render_pass.end()
+            print(f"Pass {pass_index} took {perf_counter() - start_time:.4f} seconds - {len(useful_containers)} objects rendered.")
+        print(f"Total render time: {perf_counter() - start_time:.4f} seconds")
 
         return [command_encoder.finish()]
 
