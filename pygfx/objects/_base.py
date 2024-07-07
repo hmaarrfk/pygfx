@@ -3,6 +3,8 @@ import weakref
 import threading
 from typing import List, Tuple
 import pylinalg as la
+from time import perf_counter
+from contextlib import contextmanager
 
 import numpy as np
 
@@ -17,6 +19,21 @@ from ..utils.transform import (
     callback,
 )
 from ..utils.enums import RenderMask
+
+
+timings = {
+}
+counts = {
+}
+
+@contextmanager
+def get_timing(name):
+    start = perf_counter()
+    yield
+    end = perf_counter()
+    elapsed = end - start
+    timings[name] = timings.get(name, 0) + elapsed
+    counts[name] = counts.get(name, 0) + 1
 
 
 class IdProvider:
@@ -448,7 +465,7 @@ class WorldObject(EventTarget, RootTrackable):
         for child in self._children:
             yield from child.iter(filter_fn, skip_invisible)
 
-    def get_bounding_box(self, *, include_children=True):
+    def get_bounding_box(self):
         """Axis-aligned bounding box in parent space.
 
         Returns
@@ -459,17 +476,16 @@ class WorldObject(EventTarget, RootTrackable):
         """
 
         # Collect bounding boxes
-        aabbs = []
-        if include_children:
-            for child in self._children:
-                aabb = child.get_bounding_box()
-                if aabb is not None:
-                    trafo = child.local.matrix
-                    aabbs.append(la.aabb_transform(aabb, trafo))
+        aabbs = ()
+        for child in self._children:
+            aabb = child.get_bounding_box()
+            if aabb is not None:
+                trafo = child.local.untracked_matrix
+                aabbs += (la.aabb_transform(aabb, trafo),)
         if self.geometry is not None:
             aabb = self.geometry.get_bounding_box()
             if aabb is not None:
-                aabbs.append(aabb)
+                aabbs += (aabb,)
 
         # Combine
         if aabbs:
@@ -478,7 +494,7 @@ class WorldObject(EventTarget, RootTrackable):
                 final_aabb = aabbs[0]
             else:
                 aabbs = np.stack(aabbs)
-                final_aabb = np.zeros((2, 3), dtype=float)
+                final_aabb = np.zeros((2, 3), dtype='float32')
                 final_aabb[0] = np.min(aabbs[:, 0, :], axis=0)
                 final_aabb[1] = np.max(aabbs[:, 1, :], axis=0)
         else:
@@ -499,7 +515,7 @@ class WorldObject(EventTarget, RootTrackable):
         aabb = self.get_bounding_box()
         return None if aabb is None else la.aabb_to_sphere(aabb)
 
-    def get_world_bounding_box(self, *, include_children=True):
+    def get_world_bounding_box(self):
         """Axis aligned bounding box in world space.
 
         Returns
@@ -509,7 +525,7 @@ class WorldObject(EventTarget, RootTrackable):
             object does not take up a particular space.
 
         """
-        aabb = self.get_bounding_box(include_children=include_children)
+        aabb = self.get_bounding_box()
         return None if aabb is None else la.aabb_transform(aabb, self.world.matrix)
 
     def get_world_bounding_sphere(self):
