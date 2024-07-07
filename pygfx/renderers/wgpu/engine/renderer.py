@@ -569,7 +569,6 @@ class WgpuRenderer(RootEventHandler, Renderer):
 
                 if aabb is None:
                     return True
-                return True
 
                 return aabb_inside_frustum(
                     aabb,
