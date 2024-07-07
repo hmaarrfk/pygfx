@@ -3,6 +3,8 @@ import weakref
 import threading
 from typing import List, Tuple
 import pylinalg as la
+from time import perf_counter
+from contextlib import contextmanager
 
 import numpy as np
 
@@ -17,6 +19,21 @@ from ..utils.transform import (
     callback,
 )
 from ..utils.enums import RenderMask
+
+
+timings = {
+}
+counts = {
+}
+
+@contextmanager
+def get_timing(name):
+    start = perf_counter()
+    yield
+    end = perf_counter()
+    elapsed = end - start
+    timings[name] = timings.get(name, 0) + elapsed
+    counts[name] = counts.get(name, 0) + 1
 
 
 class IdProvider:
@@ -140,6 +157,7 @@ class WorldObject(EventTarget, RootTrackable):
         visible=True,
         render_order=0,
         render_mask="auto",
+        frustum_culling=False,
         name="",
     ):
         super().__init__()
@@ -179,6 +197,7 @@ class WorldObject(EventTarget, RootTrackable):
         self.render_mask = render_mask
         self.cast_shadow = False
         self.receive_shadow = False
+        self.frustum_culling = frustum_culling
 
         self.name = name
 
@@ -232,7 +251,7 @@ class WorldObject(EventTarget, RootTrackable):
 
     @visible.setter
     def visible(self, visible):
-        self._store.visible = bool(visible)
+        self._store.visible = visible
 
     @property
     def render_order(self):
@@ -419,7 +438,7 @@ class WorldObject(EventTarget, RootTrackable):
         if keep_world_matrix:
             self.world.matrix = transform_matrix
 
-    def traverse(self, callback, skip_invisible=False):
+    def traverse(self, callback, skip_invisible=False, filter_fn=None):
         """Executes the callback on this object and all descendants.
 
         If ``skip_invisible`` is given and True, objects whose
@@ -428,7 +447,7 @@ class WorldObject(EventTarget, RootTrackable):
         is discouraged.
         """
 
-        for child in self.iter(skip_invisible=skip_invisible):
+        for child in self.iter(skip_invisible=skip_invisible, filter_fn=filter_fn):
             callback(child)
 
     def iter(self, filter_fn=None, skip_invisible=False):
@@ -439,11 +458,10 @@ class WorldObject(EventTarget, RootTrackable):
         if skip_invisible and not self.visible:
             return
 
-        if filter_fn is None:
-            yield self
-        elif filter_fn(self):
-            yield self
+        if filter_fn is not None and not filter_fn(self):
+            return
 
+        yield self
         for child in self._children:
             yield from child.iter(filter_fn, skip_invisible)
 
@@ -458,23 +476,27 @@ class WorldObject(EventTarget, RootTrackable):
         """
 
         # Collect bounding boxes
-        aabbs = []
+        aabbs = ()
         for child in self._children:
             aabb = child.get_bounding_box()
             if aabb is not None:
-                trafo = child.local.matrix
-                aabbs.append(la.aabb_transform(aabb, trafo))
+                trafo = child.local.untracked_matrix
+                aabbs += (la.aabb_transform(aabb, trafo),)
         if self.geometry is not None:
             aabb = self.geometry.get_bounding_box()
             if aabb is not None:
-                aabbs.append(aabb)
+                aabbs += (aabb,)
 
         # Combine
         if aabbs:
-            aabbs = np.stack(aabbs)
-            final_aabb = np.zeros((2, 3), dtype=float)
-            final_aabb[0] = np.min(aabbs[:, 0, :], axis=0)
-            final_aabb[1] = np.max(aabbs[:, 1, :], axis=0)
+            if len(aabbs) == 1:
+                # Fast path, no children, no need to recompute
+                final_aabb = aabbs[0]
+            else:
+                aabbs = np.stack(aabbs)
+                final_aabb = np.zeros((2, 3), dtype='float32')
+                final_aabb[0] = np.min(aabbs[:, 0, :], axis=0)
+                final_aabb[1] = np.max(aabbs[:, 1, :], axis=0)
         else:
             final_aabb = None
 

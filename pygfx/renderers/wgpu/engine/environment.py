@@ -6,6 +6,7 @@ related to the environment.
 import weakref
 import numpy as np
 import wgpu
+import time
 
 from ....utils.trackable import Trackable
 from ....objects import (
@@ -449,6 +450,7 @@ class GlobalEnvironmentManager:
             env = Environment(renderer_state_hash, scene_state_hash)
             assert env.hash == env_hash
             self.environments[env_hash] = env
+            print(f"Created new environment {env_hash} -- {time.time()}")
 
         # Update the environment
         env.update(renderer, scene, **state)
