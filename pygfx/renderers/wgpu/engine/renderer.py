@@ -64,6 +64,11 @@ def compute_frustum_planes(frustum_points):
 
     return np.array(planes)
 
+try:
+    from numba import jit
+except ImportError:
+    jit = None
+
 def aabb_inside_frustum(aabb, frustum):#  , frustum_planes):
     # https://iquilezles.org/articles/frustumcorrect/
 
@@ -96,6 +101,28 @@ def aabb_inside_frustum(aabb, frustum):#  , frustum_planes):
 
     return True
 
+if jit is not None:
+    # God, numba hasn't improved much since I last used it
+    # One basically has to rewrite the algorithm in "fortran/c" style
+    @jit
+    def aabb_inside_frustum(aabb, frustum):
+        for i in range(3):
+            count = 0
+            for j in range(len(frustum)):
+                if frustum[j, i] < aabb[0, i]:
+                    count += 1
+            if count == 8:
+                return False
+
+        for i in range(3):
+            count = 0
+            for j in range(len(frustum)):
+                if frustum[j, i] > aabb[1, i]:
+                    count += 1
+            if count == 8:
+                return False
+
+        return True
 
 
 def _get_sort_function(camera: Camera):
