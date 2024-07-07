@@ -64,7 +64,7 @@ def compute_frustum_planes(frustum_points):
 
     return np.array(planes)
 
-def aabb_inside_frustum(aabb, frustum, frustum_planes):
+def aabb_inside_frustum(aabb, frustum):#  , frustum_planes):
     # https://iquilezles.org/articles/frustumcorrect/
 
     # bbox_points = np.asarray([
@@ -78,9 +78,9 @@ def aabb_inside_frustum(aabb, frustum, frustum_planes):
     #     [aabb[0, 0], aabb[1, 1], aabb[1, 2], 1],
     # ], dtype=aabb.dtype)
 
-    # Mark -- I'm not sure why you even need this loop?
-    # isn't the other check enough?
-    # Check if any point of the bounding box is outside the frustum
+    # # Mark -- I'm not sure why you even need this loop?
+    # # isn't the other check enough?
+    # # Check if any point of the bounding box is outside the frustum
     # for plane in frustum_planes:
     #     # Check each point in the bounding box against this plane
     #     if np.all(np.sum(plane * bbox_points, axis=1) < 0):
@@ -552,38 +552,32 @@ class WgpuRenderer(RootEventHandler, Renderer):
         filter_count = {'value': 0}
         if camera is None or getattr(camera, 'frustum', None) is None:
             def filter_fn(ob, filter_count=filter_count):
-                filter_count['value'] += 1
-                return True
+                return ob.visible
+
         else:
             frustum = camera.frustum.reshape(-1, 3)
             frustum_planes = compute_frustum_planes(frustum)
             def filter_fn(ob, filter_count=filter_count):
+                if not ob.visible:
+                    return False
+
                 if not ob.frustum_culling:
                     return True
-                filter_count['value'] += 1
-                if (geometry := ob.geometry) is None:
-                    return True
 
-                # Mod for Ramona
-                if getattr(ob, 'shape_mode', None) == "material":
-                    image_shape = ob.material.image_shape
-                    aabb = np.asarray([
-                        [0, 0, 0],
-                        [image_shape[1], image_shape[0], 0]
-                    ], dtype='float32')
-                else:
-                    aabb = geometry.get_bounding_box()
-                matrix = ob.world.matrix
-                # aabb_transform seems slow.... maybe we can optimize this
-                world_aabb = la.aabb_transform(aabb, matrix, dtype='float32')
+                filter_count['value'] += 1
+                aabb = ob.get_world_bounding_box()
+
+                if aabb is None:
+                    return True
+                return True
 
                 return aabb_inside_frustum(
-                    world_aabb,
+                    aabb,
                     frustum,
-                    frustum_planes=frustum_planes
+                    # frustum_planes=frustum_planes
                 )
 
-        all_objects = list(scene.iter(skip_invisible=True, filter_fn=filter_fn))
+        all_objects = list(scene.iter(filter_fn=filter_fn))
         end = time.perf_counter()
         print(f"Traversing the scene took {end-start:.4f} seconds {filter_count} objects filtered.")
         start = end
