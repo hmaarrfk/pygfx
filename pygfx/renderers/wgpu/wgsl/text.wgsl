@@ -83,11 +83,17 @@ fn vs_main(in: VertexInput) -> Varyings {
         let ndc_pos = u_stdinfo.projection_transform * u_stdinfo.cam_transform * world_pos;
         $$ else
         var ndc_pos = u_stdinfo.projection_transform * u_stdinfo.cam_transform * world_pos;
+
+        $$ if anchor_x == "middle" or anchor_y == "middle"
+        var running_sum = vec2<f32>(0.0, 0.0);
+        $$ endif
+
         let desired_direction = {{ anchor_vector }} * screen_factor;
-        var best_score = dot(ndc_pos.xy / ndc_pos.w, desired_direction);
+
+        var best_score: f32 = -3.40282e+38;
         $$ if clamp_to_screen
-        var worst_score = best_score;
-        var worst_ndc_pos = ndc_pos;
+        var worst_score: f32 = 3.40282e+38;
+        var worst_ndc_pos = vec4<f32>(0.0);
         $$ endif
         for (var i = 0; i < {{ n_dynamic_anchors }}; i = i + 1) {
             let candidate_pos =
@@ -98,6 +104,11 @@ fn vs_main(in: VertexInput) -> Varyings {
             ;
             // I'm trying to ensure that the text stays within the screen if it can.
             let screen_pos = candidate_pos.xy / candidate_pos.w;
+
+        $$ if anchor_x == "middle" or anchor_y == "middle"
+            running_sum = running_sum + screen_pos;
+        $$ endif
+
             let current_score = dot(screen_pos, desired_direction);
             ndc_pos = select(
                 ndc_pos,
@@ -114,8 +125,15 @@ fn vs_main(in: VertexInput) -> Varyings {
             worst_score = min(worst_score, current_score);
         $$ endif
         }
-        $$ if clamp_to_screen
+        $$ if anchor_x == "middle"
+        ndc_pos.x = running_sum.x / f32({{ n_dynamic_anchors }}) * ndc_pos.w;
+        $$ endif
 
+        $$ if anchor_y == "middle"
+        ndc_pos.y = running_sum.y / f32({{ n_dynamic_anchors }}) * ndc_pos.w;
+        $$ endif
+
+        $$ if clamp_to_screen
         let new_screen_pos = ndc_pos.xy / ndc_pos.w;
         let worst_screen_pos = worst_ndc_pos.xy / worst_ndc_pos.w;
         let ndc_text_extent = abs(u_geometry.text_extents.xy - u_geometry.text_extents.zw) / screen_factor;

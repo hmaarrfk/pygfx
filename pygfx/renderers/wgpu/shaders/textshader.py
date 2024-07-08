@@ -43,11 +43,7 @@ class TextShader(BaseShader):
 
         anchor = geometry.anchor
         anchor_positions = getattr(geometry, 'anchor_positions', None)
-        if (
-            # I don't really know a good vector for the "middle"
-            anchor != "middle-middle" and
-            anchor_positions is not None
-        ):
+        if anchor_positions is not None:
             bindings.append(Binding("u_geometry", "buffer/uniform", geometry.uniform_buffer))
 
             bindings.append(Binding("s_anchor_positions", sbuffer, anchor_positions, "VERTEX"))
@@ -68,6 +64,8 @@ class TextShader(BaseShader):
                 self["anchor_vector"] = "vec2(1.0, 0.0)"
             elif geometry.anchor == "bottom-middle":
                 self["anchor_vector"] = "vec2(0.0, -1.0)"
+            elif geometry.anchor == "middle-middle":
+                self["anchor_vector"] = "vec2(0.0, 0.0)"
             else:
                 # This 0, 0 introduces a very strange metric, since
                 # it makes all the points of "equal value"
@@ -75,12 +73,11 @@ class TextShader(BaseShader):
                 # point is the first one chosen, so it stays as the
                 # chosen point
                 self["anchor_vector"] = "vec2(0.0, 0.0)"
-            self["clamp_to_screen"] = geometry.clamp_to_screen
             self["anchor_y"], self["anchor_x"] = anchor.split("-")
         else:
             self["n_dynamic_anchors"] = 0
-            self["clamp_to_screen"] = geometry.clamp_to_screen
 
+        self["clamp_to_screen"] = geometry.clamp_to_screen
 
         tex = shared.glyph_atlas_texture
         sampler = GfxSampler("linear", "clamp")
