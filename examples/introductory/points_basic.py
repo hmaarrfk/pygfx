@@ -21,8 +21,11 @@ renderer = gfx.WgpuRenderer(canvas)
 scene = gfx.Scene()
 
 positions = np.random.normal(0, 0.5, (100, 3)).astype(np.float32)
-sizes = np.random.rand(100).astype(np.float32) * 50
-colors = np.random.rand(100, 4).astype(np.float32)
+
+# But slice it beyond its length to test a (0, 3) array
+positions = positions[100:]
+sizes = np.random.rand(positions.shape[0]).astype(np.float32) * 50
+colors = np.random.rand(positions.shape[0], 4).astype(np.float32)
 geometry = gfx.Geometry(positions=positions, sizes=sizes, colors=colors)
 
 material = gfx.PointsMaterial(color_mode="vertex", size_mode="vertex")
