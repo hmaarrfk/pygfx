@@ -146,11 +146,20 @@ jobs:
     - name: Show wgpu backend
       run: |
         python -c "from examples.tests.testutils import wgpu_backend; print(wgpu_backend)"
+    # We make sure to run the compare validation examples section first
+    # Since it seems that there is some dependency on the order in which
+    # the tests are run. It is unclear what is causing it but this order now
+    # matches the generation of the screenshots which seems to help stabilize
+    # the tests.
+    # https://github.com/pygfx/pygfx/pull/824
+    - name: Compare validation examples
+      run: |
+        pytest -s -v examples -k test_examples_compare
     - name: Test examples
       env:
         PYGFX_EXPECT_LAVAPIPE: true
       run: |
-        pytest -v examples
+        pytest -s -v examples -k "not test_examples_compare"
     - uses: actions/upload-artifact@v4
       if: ${{ failure() }}
       with:
