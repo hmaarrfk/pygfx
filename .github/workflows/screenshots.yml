@@ -29,6 +29,8 @@ jobs:
         python -m pip install --upgrade pip
         pip install -e .[examples]
     - name: Regenerate screenshots
+      env:
+        PYGFX_EXPECT_LAVAPIPE: true
       run: |
         pytest -s -v --regenerate-screenshots -k test_examples_compare examples
     - uses: actions/upload-artifact@v4
