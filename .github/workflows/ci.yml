@@ -162,6 +162,11 @@ jobs:
         PYGFX_EXPECT_LAVAPIPE: true
       run: |
         pytest -s -v examples -k "not test_examples_compare"
+    - name: Test all examples
+      env:
+        PYGFX_EXPECT_LAVAPIPE: true
+      run: |
+        pytest -s -v examples
     - uses: actions/upload-artifact@v4
       if: ${{ failure() }}
       with:
