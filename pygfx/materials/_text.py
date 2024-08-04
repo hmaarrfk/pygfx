@@ -39,6 +39,8 @@ class TextMaterial(Material):
         weight_offset="f4",
         outline_thickness="f4",
         outline_color="4xf4",
+        ndc_text_limits="4xf4",
+        screen_padding="4xf4",
     )
 
     def __init__(
@@ -49,6 +51,8 @@ class TextMaterial(Material):
         outline_thickness=0,
         weight_offset=0,
         aa=True,
+        ndc_text_limits=(1., 1., -1., -1.),
+        screen_padding=(0., 0., 0., 0.),
         **kwargs
     ):
         super().__init__(**kwargs)
@@ -58,6 +62,8 @@ class TextMaterial(Material):
         self.outline_thickness = outline_thickness
         self.weight_offset = weight_offset
         self.aa = aa
+        self.ndc_text_limits = ndc_text_limits
+        self.screen_padding = screen_padding
 
     def _wgpu_get_pick_info(self, pick_value):
         # Note that the glyph index is not necessarily the same as the
@@ -143,4 +149,30 @@ class TextMaterial(Material):
     @weight_offset.setter
     def weight_offset(self, value):
         self.uniform_buffer.data["weight_offset"] = float(value)
+        self.uniform_buffer.update_range(0, 1)
+
+    @property
+    def ndc_text_limits(self):
+        data = self.uniform_buffer.data["ndc_text_limits"]
+        return float(data[0]), float(data[1]), float(data[2]), float(data[3])
+
+    @ndc_text_limits.setter
+    def ndc_text_limits(self, value):
+        if len(value) != 4:
+            raise ValueError("Must provide a 4 length object")
+
+        self.uniform_buffer.data["ndc_text_limits"][...] = value
+        self.uniform_buffer.update_range(0, 1)
+
+    @property
+    def screen_padding(self):
+        data = self.uniform_buffer.data["screen_padding"]
+        return float(data[0]), float(data[1]), float(data[2]), float(data[3])
+
+    @screen_padding.setter
+    def screen_padding(self, value):
+        if len(value) != 4:
+            raise ValueError("Must provide a 4 length object")
+
+        self.uniform_buffer.data["screen_padding"][...] = value
         self.uniform_buffer.update_range(0, 1)

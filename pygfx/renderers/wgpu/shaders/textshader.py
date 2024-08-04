@@ -41,6 +41,44 @@ class TextShader(BaseShader):
             Binding("s_sizes", sbuffer, geometry.sizes, "VERTEX"),
         ]
 
+        anchor = geometry.anchor
+        anchor_positions = getattr(geometry, 'anchor_positions', None)
+        if anchor_positions is not None:
+            bindings.append(Binding("u_geometry", "buffer/uniform", geometry.uniform_buffer))
+
+            bindings.append(Binding("s_anchor_positions", sbuffer, anchor_positions, "VERTEX"))
+            self["n_dynamic_anchors"] = len(anchor_positions.data)
+            if geometry.anchor == "top-right":
+                self["anchor_vector"] = "vec2(1.0, 1.0)"
+            elif geometry.anchor == "bottom-left":
+                self["anchor_vector"] = "vec2(-1.0, -1.0)"
+            elif geometry.anchor == "bottom-right":
+                self["anchor_vector"] = "vec2(1.0, -1.0)"
+            elif geometry.anchor == "top-left":
+                self["anchor_vector"] = "vec2(-1.0, 1.0)"
+            elif geometry.anchor == "top-middle":
+                self["anchor_vector"] = "vec2(0.0, 1.0)"
+            elif geometry.anchor == "middle-left":
+                self["anchor_vector"] = "vec2(-1.0, 0.0)"
+            elif geometry.anchor == "middle-right":
+                self["anchor_vector"] = "vec2(1.0, 0.0)"
+            elif geometry.anchor == "bottom-middle":
+                self["anchor_vector"] = "vec2(0.0, -1.0)"
+            elif geometry.anchor == "middle-middle":
+                self["anchor_vector"] = "vec2(0.0, 0.0)"
+            else:
+                # This 0, 0 introduces a very strange metric, since
+                # it makes all the points of "equal value"
+                # The only reason this works, is that the center
+                # point is the first one chosen, so it stays as the
+                # chosen point
+                self["anchor_vector"] = "vec2(0.0, 0.0)"
+            self["anchor_y"], self["anchor_x"] = anchor.split("-")
+        else:
+            self["n_dynamic_anchors"] = 0
+
+        self["clamp_to_screen"] = geometry.clamp_to_screen
+
         tex = shared.glyph_atlas_texture
         sampler = GfxSampler("linear", "clamp")
         tex_view = GfxTextureView(tex)

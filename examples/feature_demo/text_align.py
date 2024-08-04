@@ -57,35 +57,71 @@ else:
 
 print(f"========= Text =========\n{text}\n========================")
 
+import numpy as np
+positions = np.asarray([
+    [0, 0, 0],
+    [1, 1, 0],
+    [-1, 1, 0],
+    [-1, -1, 0],
+    [1, -1, 0],
+    [1.0001, 0, 0],
+    [0, 1.0001, 0],
+    [-1.0001, 0, 0],
+    [0, -1.0001, 0],
+], dtype=np.float32)
+
+colors = [
+    (1, 0, 0, 1),
+    (0, 1, 0, 1),
+    (0, 0, 1, 1),
+    (1, 1, 0, 1),
+    (0, 1, 1, 1),
+    (1, 0, 1, 1),
+    (1, 1, 1, 1),
+    (0, 0, 0, 1),
+    (0.5, 0.5, 0.5, 1),
+]
+
+points = gfx.Points(
+    gfx.Geometry(
+        positions=positions,
+        colors=colors,
+    ),
+    gfx.PointsMaterial(
+        color="#f00",
+        size=10,
+        color_mode="vertex",
+    ),
+)
+
 text = gfx.Text(
     gfx.TextGeometry(
         text=text,
         font_size=40,
         screen_space=True,
         text_align="center",
-        anchor="middle-center",
+        anchor="middle-middle",
         direction=direction,
+        anchor_positions=points.geometry.positions,
+        clamp_to_screen=True,
     ),
-    gfx.TextMaterial(color="#B4F8C8", outline_color="#000", outline_thickness=0.15),
-)
-text.local.position = (0, 0, 0)
-
-points = gfx.Points(
-    gfx.Geometry(
-        positions=[
-            text.local.position,
-        ],
+    gfx.TextMaterial(
+        color="#B4F8C8",
+        outline_color="#000",
+        outline_thickness=0.15,
+        # This should probably be in the geometry???
+        # And it should be related to the font???
+        # ndc_text_limits=(.7, 0.5, -0.9, -.8),
+        screen_padding=(20, 20, 20, 20),
     ),
-    gfx.PointsMaterial(color="#f00", size=10),
 )
 
 scene.add(text, points)
-
-camera = gfx.OrthographicCamera(4, 3)
-
-
 renderer = gfx.renderers.WgpuRenderer(WgpuCanvas(size=(800, 600)))
 
+camera = gfx.PerspectiveCamera(70)
+camera.show_object(scene)
+controller = gfx.OrbitController(camera, register_events=renderer)
 
 @renderer.add_event_handler("key_down")
 def change_justify(event):
@@ -137,11 +173,42 @@ def change_justify(event):
         text.geometry.font_size *= 1.1
     elif event.key == "g":
         text.geometry.font_size /= 1.1
+    elif event.key == "y":
+        text.geometry.clamp_to_screen = not text.geometry.clamp_to_screen
+    elif event.key == "t":
+        anchor_positions = text.geometry.anchor_positions
+        if anchor_positions is not None:
+            text.geometry.anchor_positions = None
+        else:
+            # Share the same buffer, so we only need to update one
+            # of them
+            text.geometry.anchor_positions = points.geometry.positions
+    elif event.key in ["ArrowRight", "ArrowLeft"]:
+        if event.key == "ArrowRight":
+            angle = 5
+        else:
+            angle = -5
+        # Create a 5 degree rotation matrix around the z axis
+        rotation = np.asarray([
+            [np.cos(angle * np.pi / 180), -np.sin(angle * np.pi / 180), 0],
+            [np.sin(angle * np.pi / 180), np.cos(angle * np.pi / 180), 0],
+            [0, 0, 1],
+        ], dtype=np.float32)
+
+        # Rotate the anchor position
+        positions = points.geometry.positions.data
+        new_positions = positions @ rotation
+        points.geometry.positions.data[...] = new_positions
+        points.geometry.positions.update_range()
+    else:
+        print(f"Ignoring key {event.key}")
+        return
 
     print(f"Anchor: {text.geometry.anchor}")
     print(f"Text align: {text.geometry.text_align}")
     print(f"Text align last: {text.geometry.text_align_last}")
     print(f"Font size: {text.geometry.font_size}")
+    print(f"Clamp to screen: {text.geometry.clamp_to_screen}")
 
     renderer.request_draw()
 
@@ -179,6 +246,8 @@ Use
 * l to set the alignment of the last line to justify.
 * f to increase the font size.
 * g to decrease the font size.
+* y to toggle screen clamping.
+* t to toggle multiple anchors.
 
 """
 )

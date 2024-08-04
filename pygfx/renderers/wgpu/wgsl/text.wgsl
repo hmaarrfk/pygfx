@@ -75,9 +75,118 @@ fn vs_main(in: VertexInput) -> Varyings {
         // We apply these separately in screen space, so the user can scale and rotate the text that way.
 
         let raw_pos = vec3<f32>(0.0, 0.0, 0.0);
-        let world_pos = u_wobject.world_transform * vec4<f32>(raw_pos, 1.0);
+        var world_pos = u_wobject.world_transform * vec4<f32>(raw_pos, 1.0);
+
+        $$ if n_dynamic_anchors < 1
+        // is WGSL smart enough to optimize var -> let when the particular variable dosesn't
+        // change in the scope???
         let ndc_pos = u_stdinfo.projection_transform * u_stdinfo.cam_transform * world_pos;
-        let vertex_pos_rotated_and_scaled = u_wobject.rot_scale_transform * vec4<f32>(vertex_pos, 0.0, 1.0);
+        $$ else
+        var ndc_pos = u_stdinfo.projection_transform * u_stdinfo.cam_transform * world_pos;
+
+        $$ if anchor_x == "middle" or anchor_y == "middle"
+        var running_sum = vec2<f32>(0.0, 0.0);
+        $$ endif
+
+        let desired_direction = {{ anchor_vector }} * screen_factor;
+
+        var best_score: f32 = -3.40282e+38;
+        $$ if clamp_to_screen
+        var worst_score: f32 = 3.40282e+38;
+        var worst_ndc_pos = vec4<f32>(0.0);
+        $$ endif
+        for (var i = 0; i < {{ n_dynamic_anchors }}; i = i + 1) {
+            let candidate_pos =
+                u_stdinfo.projection_transform *
+                u_stdinfo.cam_transform *
+                u_wobject.world_transform *
+                vec4<f32>(load_s_anchor_positions(i), 1.0)
+            ;
+            // I'm trying to ensure that the text stays within the screen if it can.
+            let screen_pos = candidate_pos.xy / candidate_pos.w;
+
+        $$ if anchor_x == "middle" or anchor_y == "middle"
+            running_sum = running_sum + screen_pos;
+        $$ endif
+
+            let current_score = dot(screen_pos, desired_direction);
+            ndc_pos = select(
+                ndc_pos,
+                candidate_pos,
+                current_score > best_score
+            );
+            best_score = max(best_score, current_score);
+        $$ if clamp_to_screen
+            worst_ndc_pos = select(
+                worst_ndc_pos,
+                candidate_pos,
+                current_score < worst_score
+            );
+            worst_score = min(worst_score, current_score);
+        $$ endif
+        }
+        $$ if anchor_x == "middle"
+        ndc_pos.x = running_sum.x / f32({{ n_dynamic_anchors }}) * ndc_pos.w;
+        $$ endif
+
+        $$ if anchor_y == "middle"
+        ndc_pos.y = running_sum.y / f32({{ n_dynamic_anchors }}) * ndc_pos.w;
+        $$ endif
+
+        $$ if clamp_to_screen
+        let new_screen_pos = ndc_pos.xy / ndc_pos.w;
+        let worst_screen_pos = worst_ndc_pos.xy / worst_ndc_pos.w;
+        let ndc_text_extent = abs(u_geometry.text_extents.xy - u_geometry.text_extents.zw) / screen_factor;
+        $$ if anchor_y == "top"
+        let limit_y = min(
+            u_material.ndc_text_limits.y,
+            (screen_factor.y - u_material.screen_padding.y) / screen_factor.y
+        );
+        ndc_pos.y = select(
+            ndc_pos.y,
+            ndc_pos.w * max(min(worst_screen_pos.y + ndc_text_extent.y, new_screen_pos.y), limit_y),
+            new_screen_pos.y > limit_y
+        );
+        $$ elif anchor_y == "bottom"
+        let limit_y = max(
+            u_material.ndc_text_limits.w,
+            -(screen_factor.y - u_material.screen_padding.w) / screen_factor.y
+        );
+        ndc_pos.y = select(
+            ndc_pos.y,
+            ndc_pos.w * min(max(worst_screen_pos.y - ndc_text_extent.y, new_screen_pos.y), limit_y),
+            new_screen_pos.y < limit_y
+        );
+        $$ endif
+
+        $$ if anchor_x == "right"
+        let limit_x = min(
+            u_material.ndc_text_limits.x,
+            (screen_factor.x - u_material.screen_padding.x) / screen_factor.x
+        );
+        ndc_pos.x = select(
+            ndc_pos.x,
+            ndc_pos.w * max(min(worst_screen_pos.x + ndc_text_extent.x, new_screen_pos.x), limit_x),
+            new_screen_pos.x > limit_x
+        );
+        $$ elif anchor_x == "left"
+        let limit_x = max(
+            u_material.ndc_text_limits.z,
+            -(screen_factor.x - u_material.screen_padding.z) / screen_factor.x
+        );
+        ndc_pos.x = select(
+            ndc_pos.x,
+            ndc_pos.w * min(max(worst_screen_pos.x - ndc_text_extent.x, new_screen_pos.x), limit_x),
+            new_screen_pos.x < limit_x
+        );
+        $$ endif
+        // clamp_to_screen
+        $$ endif
+        // n_dynamic_anchors
+        $$ endif
+
+        let vertex_pos_rotated_and_scaled = u_wobject.rot_scale_transform * vec4<f32>(
+            vertex_pos, 0.0, 1.0);
         let delta_ndc = vertex_pos_rotated_and_scaled.xy / screen_factor;
 
         // Pixel scale is easy

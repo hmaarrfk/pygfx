@@ -11,6 +11,7 @@ import numpy as np
 from ..resources import Buffer
 from ..utils import text as textmodule
 from ._base import Geometry
+from ..utils import array_from_shadertype
 
 _TEXT_ALIGNMENTS = [
     "start",
@@ -214,6 +215,9 @@ class TextGeometry(Geometry):
 
     """
 
+    uniform_type = dict(
+        text_extents="4xf4",
+    )
     def __init__(
         self,
         text=None,
@@ -229,13 +233,24 @@ class TextGeometry(Geometry):
         text_align_last="auto",
         family=None,
         direction=None,
+        anchor_positions=None,
+        clamp_to_screen=False,
     ):
-        super().__init__()
+        if anchor_positions is not None:
+            geometry_args = dict(
+                anchor_positions=anchor_positions,
+            )
+        else:
+            geometry_args = {}
+        super().__init__(**geometry_args)
+        self._store.uniform_buffer = Buffer(array_from_shadertype(self.uniform_type))
+
 
         # Init stub buffers
         self.indices = None
         self.positions = None
         self.sizes = None
+        self.clamp_to_screen = clamp_to_screen
 
         # Init props unrelated to layout
         self.screen_space = screen_space
@@ -293,6 +308,14 @@ class TextGeometry(Geometry):
     @screen_space.setter
     def screen_space(self, value):
         self._store.screen_space = bool(value)
+
+    @property
+    def clamp_to_screen(self):
+        return self._store.clamp_to_screen
+
+    @clamp_to_screen.setter
+    def clamp_to_screen(self, value):
+        self._store.clamp_to_screen = bool(value)
 
     def set_text_items(self, text_items):
         """Update the text using one or more TextItems.
@@ -637,7 +660,7 @@ class TextGeometry(Geometry):
         # We try to follow CSS  which multiplies the line_height by the font_size as well
         line_height = self.line_height * font_size
 
-        anchor = self._anchor
+        anchor = self.anchor
         text_align = self._text_align
         text_align_last = self._text_align_last
         if text_align_last == "auto":
@@ -860,6 +883,10 @@ class TextGeometry(Geometry):
         self.sizes.update_range(0, i2)
         self.positions.update_range(0, i2)
 
+        self.uniform_buffer.data["text_extents"][...] = (left, bottom, right, top)
+        self.uniform_buffer.update_range(0, 1)
+
+
     def apply_layout(self):
         """Update the internal contained glyphs.
 
@@ -978,7 +1005,9 @@ class TextGeometry(Geometry):
         * Vertical values: "top", "middle", "baseline", "bottom".
         * Horizontal values: "left", "center", "right".
         """
-        return self._anchor
+        # Do not alias anchor otherwise the geometry.__setattr__
+        # will take over the property setter
+        return self._store.the_anchor
 
     @anchor.setter
     def anchor(self, anchor):
@@ -1008,7 +1037,9 @@ class TextGeometry(Geometry):
         except KeyError:
             raise ValueError(f"Invalid anchor value '{anchor}'")
         # Apply
-        self._anchor = f"{anchory}-{anchorx}"
+        # Do not alias anchor otherwise the geometry.__setattr__
+        # will take over the property setter
+        self._store.the_anchor = anchor
         self.apply_layout()
 
     @property
