@@ -166,8 +166,11 @@ class FontManager:
 
         # The main font of the default font is the fallback of fallbacks.
         # We copy the fontfile so we can detect when it's used to show tofu's.
-        ff = self._family_to_font["Noto Sans"]["Regular"]
-        self._fallback_font = FontFile(ff.filename, ff.family, ff.variant)
+        # Don't be fancy, lets just assume this file exists
+        # this means that users get a consistent default experience when they
+        # use the defaults of PyGFX accross different platforms
+        filename = os.path.join(get_resources_dir(), "NotoSans-Regular.ttf")
+        self._fallback_font = FontFile(filename, "Noto Sans", "Regular")
 
     def _load_default_font_index(self):
         # Load the json
