@@ -16,6 +16,9 @@ jobs:
     runs-on: 'ubuntu-latest'
     steps:
     - uses: actions/checkout@v4
+    - uses: proudust/gh-describe@v2
+      # id needed to generate the outputs
+      id: ghd
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
@@ -26,10 +29,12 @@ jobs:
         sudo apt install --no-install-recommends -y libegl1-mesa libgl1-mesa-dri libxcb-xfixes0-dev mesa-vulkan-drivers
     - name: Install dev dependencies
       run: |
+        export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
         python -m pip install --upgrade pip
         pip install -e .[examples]
     - name: Regenerate screenshots
       run: |
+        export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
         pytest -v --regenerate-screenshots -k test_examples_compare examples
     - uses: actions/upload-artifact@v4
       if: always()

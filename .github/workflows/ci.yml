@@ -23,6 +23,9 @@ jobs:
       fail-fast: false
     steps:
     - uses: actions/checkout@v4
+    - uses: proudust/gh-describe@v2
+      # id needed to generate the outputs
+      id: ghd
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
@@ -33,6 +36,7 @@ jobs:
         pip install -U black flake8 flake8-black pep8-naming
     - name: Flake8
       run: |
+        export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
         flake8 .
 
   docs-build:
@@ -42,6 +46,9 @@ jobs:
       fail-fast: false
     steps:
     - uses: actions/checkout@v4
+    - uses: proudust/gh-describe@v2
+      # id needed to generate the outputs
+      id: ghd
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
@@ -52,10 +59,12 @@ jobs:
         sudo apt-get install --no-install-recommends -y libegl1-mesa libgl1-mesa-dri libxcb-xfixes0-dev mesa-vulkan-drivers
     - name: Install dev dependencies
       run: |
+        export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
         python -m pip install --upgrade pip
         pip install -U -e .[examples,docs]
     - name: Build docs
       run: |
+        export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
         cd docs
         make html SPHINXOPTS="-W --keep-going"
 
@@ -83,6 +92,9 @@ jobs:
             pyversion: '3.12'
     steps:
     - uses: actions/checkout@v4
+    - uses: proudust/gh-describe@v2
+      # id needed to generate the outputs
+      id: ghd
     - name: Set up Python ${{ matrix.pyversion }}
       uses: actions/setup-python@v5
       with:
@@ -94,6 +106,7 @@ jobs:
         sudo apt install -y libegl1-mesa libgl1-mesa-dri libxcb-xfixes0-dev mesa-vulkan-drivers
     - name: Install package and dev dependencies
       run: |
+        export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
         python -m pip install --upgrade pip
         pip install .[dev]
         rm -r pygfx
@@ -106,17 +119,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+    - uses: proudust/gh-describe@v2
+      # id needed to generate the outputs
+      id: ghd
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: 3.12
     - name: Install package and dev dependencies
       run: |
+        export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
         python -m pip install --upgrade pip
         pip install .[dev]
     - name: Unit tests
       run: |
-        pytest -v pygfx/__pyinstaller
+        pushd "${HOME}"
+        pytest --pyargs -vx pygfx.__pyinstaller
 
   test-examples-build:
     name: Test examples ${{ matrix.pyversion }}
@@ -131,6 +149,9 @@ jobs:
             pyversion: '3.12'
     steps:
     - uses: actions/checkout@v4
+    - uses: proudust/gh-describe@v2
+      # id needed to generate the outputs
+      id: ghd
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
@@ -141,15 +162,18 @@ jobs:
         sudo apt-get install --no-install-recommends -y libegl1-mesa libgl1-mesa-dri libxcb-xfixes0-dev mesa-vulkan-drivers
     - name: Install dev dependencies
       run: |
+        export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
         python -m pip install --upgrade pip
         pip install -e .[dev,examples]
     - name: Show wgpu backend
       run: |
+        export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
         python -c "from examples.tests.testutils import adapter; print(adapter.info)"
     - name: Test examples
       env:
         PYGFX_EXPECT_LAVAPIPE: true
       run: |
+        export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
         pytest -v examples
     - uses: actions/upload-artifact@v4
       if: ${{ failure() }}
@@ -164,6 +188,9 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
+      - uses: proudust/gh-describe@v2
+        # id needed to generate the outputs
+        id: ghd
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -173,9 +200,11 @@ jobs:
           python -m pip install --upgrade pip wheel setuptools twine
       - name: Create source distribution
         run: |
+          export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
           python setup.py sdist
       - name: Build wheels
         run: |
+          export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
           pip wheel --no-deps -w dist .
       - name: Test sdist
         shell: bash
@@ -183,6 +212,9 @@ jobs:
           rm -rf ./pygfx
           pushd $HOME
           pip install $GITHUB_WORKSPACE/dist/*.tar.gz
+          python -c "import pygfx; print(pygfx.__version__)"
+          python -c "import pygfx; assert not pygfx.__version__.startswith('nodescription')"
+          python -c "import pygfx; assert not pygfx.__version__.startswith('unknown')"
           popd
           # don't run tests, we just want to know if the sdist can be installed
           pip uninstall -y pygfx
@@ -201,6 +233,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [test-builds, release-build]
     if: success() && startsWith(github.ref, 'refs/tags/v')
+    # The tag will support git describe
     steps:
     - uses: actions/checkout@v4
     - name: Set up Python
