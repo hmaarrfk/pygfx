@@ -23,6 +23,17 @@ jobs:
       fail-fast: false
     steps:
     - uses: actions/checkout@v4
+    - uses: proudust/gh-describe@v2
+      # id needed to generate the outputs
+      id: ghd
+    - name: Check outputs
+      run: |
+        echo "describe  : ${{ steps.ghd.outputs.describe }}"
+        echo "tag       : ${{ steps.ghd.outputs.tag }}"
+        echo "distance  : ${{ steps.ghd.outputs.distance }}"
+        echo "sha       : ${{ steps.ghd.outputs.sha }}"
+        echo "short-sha : ${{ steps.ghd.outputs.short-sha }}"
+        export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
@@ -42,6 +53,17 @@ jobs:
       fail-fast: false
     steps:
     - uses: actions/checkout@v4
+    - uses: proudust/gh-describe@v2
+      # id needed to generate the outputs
+      id: ghd
+    - name: Check outputs
+      run: |
+        echo "describe  : ${{ steps.ghd.outputs.describe }}"
+        echo "tag       : ${{ steps.ghd.outputs.tag }}"
+        echo "distance  : ${{ steps.ghd.outputs.distance }}"
+        echo "sha       : ${{ steps.ghd.outputs.sha }}"
+        echo "short-sha : ${{ steps.ghd.outputs.short-sha }}"
+        export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
@@ -106,6 +128,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+    - uses: proudust/gh-describe@v2
+      # id needed to generate the outputs
+      id: ghd
+    - name: Check outputs
+      run: |
+        echo "describe  : ${{ steps.ghd.outputs.describe }}"
+        echo "tag       : ${{ steps.ghd.outputs.tag }}"
+        echo "distance  : ${{ steps.ghd.outputs.distance }}"
+        echo "sha       : ${{ steps.ghd.outputs.sha }}"
+        echo "short-sha : ${{ steps.ghd.outputs.short-sha }}"
+        export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
@@ -131,6 +164,17 @@ jobs:
             pyversion: '3.12'
     steps:
     - uses: actions/checkout@v4
+    - uses: proudust/gh-describe@v2
+      # id needed to generate the outputs
+      id: ghd
+    - name: Check outputs
+      run: |
+        echo "describe  : ${{ steps.ghd.outputs.describe }}"
+        echo "tag       : ${{ steps.ghd.outputs.tag }}"
+        echo "distance  : ${{ steps.ghd.outputs.distance }}"
+        echo "sha       : ${{ steps.ghd.outputs.sha }}"
+        echo "short-sha : ${{ steps.ghd.outputs.short-sha }}"
+        export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
@@ -164,6 +208,17 @@ jobs:
       fail-fast: false
     steps:
       - uses: actions/checkout@v4
+      - uses: proudust/gh-describe@v2
+        # id needed to generate the outputs
+        id: ghd
+      - name: Check outputs
+        run: |
+          echo "describe  : ${{ steps.ghd.outputs.describe }}"
+          echo "tag       : ${{ steps.ghd.outputs.tag }}"
+          echo "distance  : ${{ steps.ghd.outputs.distance }}"
+          echo "sha       : ${{ steps.ghd.outputs.sha }}"
+          echo "short-sha : ${{ steps.ghd.outputs.short-sha }}"
+          export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
