@@ -64,8 +64,9 @@ def get_version_from_git():
         git_describe = p.communicate()[0].decode()
 
     description = (
-        git_describe
-        .lstrip("v")  # Tags can have a leading 'v', but the version should not
+        git_describe.lstrip(
+            "v"
+        )  # Tags can have a leading 'v', but the version should not
         .rstrip("\n")
         .rsplit("-")  # Split the latest tag, commits since tag, and hash, and dirty
     )
