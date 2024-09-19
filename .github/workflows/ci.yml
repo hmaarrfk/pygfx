@@ -204,6 +204,7 @@ jobs:
           python setup.py sdist
       - name: Build wheels
         run: |
+          export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
           pip wheel --no-deps -w dist .
       - name: Test sdist
         shell: bash
@@ -212,6 +213,8 @@ jobs:
           pushd $HOME
           pip install $GITHUB_WORKSPACE/dist/*.tar.gz
           python -c "import pygfx; print(pygfx.__version__)"
+          python -c "import pygfx; assert not pygfx.__version__.startswith('nodescription')"
+          python -c "import pygfx; assert not pygfx.__version__.startswith('unknown')"
           popd
           # don't run tests, we just want to know if the sdist can be installed
           pip uninstall -y pygfx
