@@ -58,10 +58,13 @@ def get_version_from_git():
             break
     else:
         return
+    if os.environ.get("PYGFX_GIT_DESCRIBE", None):
+        git_describe = os.environ["PYGFX_GIT_DESCRIBE"]
+    else:
+        git_describe = p.communicate()[0].decode()
 
     description = (
-        p.communicate()[0]
-        .decode()
+        git_describe
         .lstrip("v")  # Tags can have a leading 'v', but the version should not
         .rstrip("\n")
         .rsplit("-")  # Split the latest tag, commits since tag, and hash, and dirty
