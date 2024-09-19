@@ -133,8 +133,8 @@ jobs:
         pip install .[dev]
     - name: Unit tests
       run: |
-        export PYGFX_GIT_DESCRIBE=${{ steps.ghd.outputs.describe }}
-        pytest -vx pygfx/__pyinstaller
+        pushd "${HOME}"
+        pytest --pyargs -vx pygfx.__pyinstaller
 
   test-examples-build:
     name: Test examples ${{ matrix.pyversion }}
