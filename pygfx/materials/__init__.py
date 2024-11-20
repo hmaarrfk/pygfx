@@ -83,6 +83,7 @@ from ._line import (
     LineThinMaterial,
     LineThinSegmentMaterial,
     LineDebugMaterial,
+    LineSDFMaterial,
 )
 from ._image import ImageBasicMaterial
 from ._volume import (

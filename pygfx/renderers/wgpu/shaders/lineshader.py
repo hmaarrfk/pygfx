@@ -14,6 +14,7 @@ from ....materials._line import (
     LineThinMaterial,
     LineThinSegmentMaterial,
     LineDebugMaterial,
+    LineSDFMaterial,
 )
 
 from .. import (
@@ -464,3 +465,12 @@ class ThinLineSegmentShader(ThinLineShader):
             "primitive_topology": wgpu.PrimitiveTopology.line_list,
             "cull_mode": wgpu.CullMode.none,
         }
+
+
+@register_wgpu_render_function(Line, LineSDFMaterial)
+class LineSDFShader(ThinLineShader):
+    def __init__(self, wobject):
+        super().__init__(wobject)
+
+    def get_code(self):
+        return load_wgsl("line_sdf.wgsl")
