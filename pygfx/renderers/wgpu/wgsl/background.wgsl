@@ -41,8 +41,16 @@ fn vs_main(in: VertexInput) -> Varyings {
     $$ else
         // Store positions and the view direction in the world
         varyings.position = vec4<f32>(pos, 0.9999999, 1.0);
-        varyings.world_pos = vec3<f32>(ndc_to_world_pos(out.position));
-        varyings.texcoord = vec3<f32>(pos * 0.5 + 0.5, 0.0);
+        varyings.world_pos = vec3<f32>(main_ndc_to_world_pos(out.position));
+        varyings.texcoord = vec3<f32>(
+            (
+                // In most cases the following product will be an identify
+                // with the exception where the user is trying to render on a different
+                // canvas than the main camera where the seen is being viewed from
+                (u_stdinfo.main_projection_transform * u_stdinfo.main_cam_transform *
+                 u_stdinfo.cam_transform_inv * u_stdinfo.projection_transform_inv) *
+              vec4(pos, 0.0, 1.)).xy * 0.5 + 0.5,
+            0.0);
     $$ endif
     return varyings;
 }

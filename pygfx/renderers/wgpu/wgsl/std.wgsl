@@ -90,6 +90,12 @@ fn ndc_to_world_pos(ndc_pos: vec4<f32>) -> vec3<f32> {
     return world_pos.xyz / world_pos.w;
 }
 
+fn main_ndc_to_world_pos(ndc_pos: vec4<f32>) -> vec3<f32> {
+    let ndc_to_world = u_stdinfo.main_cam_transform_inv * u_stdinfo.main_projection_transform_inv;
+    let world_pos = ndc_to_world * ndc_pos;
+    return world_pos.xyz / world_pos.w;
+}
+
 fn is_orthographic() -> bool {
     return u_stdinfo.projection_transform[2][3] == 0.0;
 }
@@ -178,4 +184,3 @@ fn pick_pack(value: u32, bits: i32) -> vec4<u32> {
     let selector2 = vec4<bool>( abs(shift[0]) < 32, abs(shift[1]) < 32, abs(shift[2]) < 32, abs(shift[3]) < 32 );
     return select( vec4<u32>(0u) , pick_new & mask , selector2 );
 }
-
