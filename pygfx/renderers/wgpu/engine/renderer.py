@@ -130,6 +130,7 @@ class WgpuRenderer(RootEventHandler, Renderer):
         sort_objects=False,
         enable_events=True,
         gamma_correction=1.0,
+        main_camera=None,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -146,6 +147,7 @@ class WgpuRenderer(RootEventHandler, Renderer):
         self._target = target
         self.pixel_ratio = pixel_ratio
         self.pixel_filter = pixel_filter
+        self.main_camera = main_camera
 
         # Make sure we have a shared object (the first renderer creates the instance)
         self._shared = get_shared()
@@ -268,6 +270,14 @@ class WgpuRenderer(RootEventHandler, Renderer):
         if value is None:
             value = 1.0
         self._pixel_filter = max(0.0, float(value))
+
+    @property
+    def main_camera(self):
+        return self._main_camera
+
+    @main_camera.setter
+    def main_camera(self, value):
+        self._main_camera = value
 
     @property
     def rect(self):
@@ -428,6 +438,10 @@ class WgpuRenderer(RootEventHandler, Renderer):
                 call to ``render()`` after a flush, and False otherwise.
             flush (bool, optional): Whether to flush the rendered result into
                 the target (texture or canvas). Default True.
+            main_camera (Camera, optional): The main camera of the scene. This is
+                often used in more advanced usecases such as multi-shot rendering
+                where the scene is rendered from multiple viewpoints. If None,
+                the camera is assumed to be the main camera
         """
 
         # Define whether to clear color.
@@ -486,6 +500,9 @@ class WgpuRenderer(RootEventHandler, Renderer):
         # Ensure that matrices are up-to-date
         camera.set_view_size(*scene_lsize)
         camera.update_projection_matrix()
+        # Update the main camera???
+        # if self.main_camera is not None:
+        #     self.main_camera.update_projection_matrix()
 
         # Flatten the scenegraph, categorised by render_order
         wobject_dict = {}
@@ -690,6 +707,19 @@ class WgpuRenderer(RootEventHandler, Renderer):
         # stdinfo_data["ndc_to_world"].flat = mat_inv(stdinfo_data["cam_transform"] @ stdinfo_data["projection_transform"])
         stdinfo_data["physical_size"] = physical_size
         stdinfo_data["logical_size"] = logical_size
+        if (main_camera := self.main_camera) is not None:
+            stdinfo_data["main_cam_transform"] = main_camera.world.inverse_matrix.T
+            stdinfo_data["main_cam_transform_inv"] = main_camera.world.matrix.T
+            stdinfo_data["main_projection_transform"] = main_camera.projection_matrix.T
+            stdinfo_data["main_projection_transform_inv"] = main_camera.projection_matrix_inverse.T
+        else:
+            # hmm. can we avoid this???
+            # It would be nice to not add anything to stdinfo in the case where the two
+            # cameras are the same
+            stdinfo_data["main_cam_transform"] = camera.world.inverse_matrix.T
+            stdinfo_data["main_cam_transform_inv"] = camera.world.matrix.T
+            stdinfo_data["main_projection_transform"] = camera.projection_matrix.T
+            stdinfo_data["main_projection_transform_inv"] = camera.projection_matrix_inverse.T
         # Upload to GPU
         self._shared.uniform_buffer.update_full()
 
