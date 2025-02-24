@@ -31,7 +31,36 @@ fn yuv_full_to_rgb(y: f32, u: f32, v: f32) -> vec4<f32> {
 
 fn sample_im(texcoord: vec2<f32>, sizef: vec2<f32>) -> vec4<f32> {
     $$ if img_format == 'f32'
-        $$ if colorspace == 'yuv420p'
+        $$ if colorspace == 'yuv420p-semiplanar'
+            let x_size = i32(sizef.x);
+            let y_size = i32(sizef.y) * 2 / 3;
+            let sizei = vec2<i32>(x_size, y_size);
+            let texcoord_index = vec2<i32>(
+                i32(texcoord.x * f32(x_size)),
+                i32(texcoord.y * f32(y_size)),
+            );
+
+            let texcoord_index_uv_y = texcoord_index.y / 2;
+            let texcoord_index_u = vec2<f32>(
+                f32(texcoord_index.x + (texcoord_index.y - texcoord_index_uv_y * 2) * x_size),
+                f32(y_size + texcoord_index_uv_y),
+            );
+            let texcoord_index_v = vec2<f32>(
+                f32(texcoord_index.x + (texcoord_index.y - texcoord_index_uv_y * 2) * x_size),
+                f32(y_size + y_size / 4 + texcoord_index_uv_y),
+            );
+
+
+            let y = textureSample(t_img, s_img, (vec2<f32>(texcoord_index) + 0.5) / sizef).x;
+            let u = textureSample(t_img, s_img, (vec2<f32>(texcoord_index_u) + 0.5) / sizef).x;
+            let v = textureSample(t_img, s_img, (vec2<f32>(texcoord_index_v) + 0.5) / sizef).x;
+
+            $$ if colorrange == "limited"
+            return yuv_limited_to_rgb(y, u, v);
+            $$ else
+            return yuv_full_to_rgb(y, u, v);
+            $$ endif
+        $$ elif colorspace == 'yuv420p'
             $$ if three_grid_yuv
             let y = textureSample(t_img, s_img, texcoord.xy).x;
             let u = textureSample(t_u_img, s_img, texcoord.xy).x;

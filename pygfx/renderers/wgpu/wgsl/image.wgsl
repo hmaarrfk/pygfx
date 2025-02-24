@@ -37,7 +37,12 @@ fn vs_main(in: VertexInput) -> Varyings {
 
 @fragment
 fn fs_main(varyings: Varyings) -> FragmentOutput {
+$$ if colorspace == "yuv420p-semiplanar"
+    let _sizef = vec2<f32>(textureDimensions(t_img));
+    let sizef = vec2<f32>(_sizef.x, _sizef.y * 1.5);
+$$ else
     let sizef = vec2<f32>(textureDimensions(t_img));
+$$ endif
     let value = sample_im(varyings.texcoord.xy, sizef);
     let color = sampled_value_to_color(value);
 

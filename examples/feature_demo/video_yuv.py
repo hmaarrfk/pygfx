@@ -110,17 +110,18 @@ if "PYTEST_CURRENT_TEST" not in os.environ:
             "GUI framework's. Typically this is 30, 60, or 120 fps."
         ),
     )
+
     parser.add_argument(
-        "--three-grid-yuv",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Use three distinct grids for YUV components.",
+        "--yuv-arrangement",
+        type=str,
+        default="planar",
+        help="Choose from 'planar', 'semiplanar', 'three_gird'. Only valid for yuv420p and yuv444p",
     )
     args = parser.parse_args()
     FORMAT = args.format
     COLORRANGE = args.colorrange
     OFFSCREEN = args.offscreen
-    THREE_GRID_YUV = args.three_grid_yuv
+    YUV_ARRANGEMENT = args.yuv_arrangement
 
     if args.filename:
         FILENAME = args.filename
@@ -130,8 +131,10 @@ else:
     OFFSCREEN = False
     COLORRANGE = "limited"
     FORMAT = "yuv444p"
-    THREE_GRID_YUV = False
     FILENAME = None
+    YUV_ARRANGEMENT = "planar"
+
+THREE_GRID_YUV = YUV_ARRANGEMENT == "three_grid"
 
 
 if FILENAME is None:
@@ -146,8 +149,7 @@ print(f"Reading video from {FILENAME}")
 print(f"Format: {FORMAT}")
 print(f"Color range: {COLORRANGE}")
 print(f"Offscreen: {OFFSCREEN}")
-print(f"Three grid YUV: {THREE_GRID_YUV}")
-
+print(f"YUV arrangement: {YUV_ARRANGEMENT}")
 
 def video_width_height():
     with av.open(FILENAME) as container:
@@ -216,6 +218,16 @@ if FORMAT == "yuv420p" and THREE_GRID_YUV:
         size=(w // 2, h // 2),
         dim=2,
         colorspace="yuv420p",
+        colorrange=COLORRANGE,
+        format="r8unorm",
+        usage=wgpu.TextureUsage.COPY_DST,
+    )
+elif FORMAT == "yuv420p" and YUV_ARRANGEMENT == "semiplanar":
+    import ipdb; ipdb.set_trace()
+    tex = gfx.Texture(
+        size=(w, h * 3 // 2),
+        dim=2,
+        colorspace="yuv420p-semiplanar",
         colorrange=COLORRANGE,
         format="r8unorm",
         usage=wgpu.TextureUsage.COPY_DST,
@@ -305,7 +317,9 @@ def animate():
         y = data[:h]
         u = data[h : h + h // 4].reshape(h // 2, w // 2)
         v = data[h + h // 4 :].reshape(h // 2, w // 2)
-        if THREE_GRID_YUV:
+        if YUV_ARRANGEMENT == "semiplanar":
+            tex.send_data((0, 0), data)
+        elif THREE_GRID_YUV:
             # All planes are contiguous, so there are zero data copies.
             tex.send_data((0, 0), y)
             u_tex.send_data((0, 0), u)
