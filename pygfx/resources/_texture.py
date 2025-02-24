@@ -113,6 +113,7 @@ class Texture(Resource):
             "tex-srgb",
             "physical",
             "yuv420p",
+            "yuv420p-semiplanar",
             "yuv444p",
         )
         self._colorrange = (colorrange or "limited").lower()
