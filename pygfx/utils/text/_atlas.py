@@ -221,27 +221,12 @@ class GlyphAtlas(RectPacker):
         if size == self._array.shape[0]:
             # Keep the array, we'll repack only
             array1 = self._array.copy()
-            # REMOVE THESE ASSERT STATEMENTS
-            # Assert that the user has not modified the boundary of the array
-            np.testing.assert_array_equal(array1[0, :], 128)
-            np.testing.assert_array_equal(array1[-1, :], 128)
-            np.testing.assert_array_equal(array1[:, 0], 128)
-            np.testing.assert_array_equal(array1[:, -0], 128)
             array2 = self._array
-            # REVERT THIS CHANGE BACK TO 0
-            array2.fill(128)
+            array2.fill(0)
         else:
             # Create new array
             array1 = self._array
-            # REMOVE THESE ASSERT STATEMENTS
-            # Assert that the user has not modified the boundary of the array
-            if array1.shape != (0,):
-                np.testing.assert_array_equal(array1[0, :], 128)
-                np.testing.assert_array_equal(array1[-1, :], 128)
-                np.testing.assert_array_equal(array1[:, 0], 128)
-                np.testing.assert_array_equal(array1[:, -0], 128)
-            # REVERT THE FILL VALUE BACK TO 0
-            array2 = np.full((size, size), fill_value=128, dtype=np.uint8)
+            array2 = np.zeros((size, size), dtype=np.uint8)
             self._array = array2
 
         # We're going to pack it up fresh
