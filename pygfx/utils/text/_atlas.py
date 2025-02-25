@@ -59,25 +59,29 @@ class RectPacker:
         Returns the newly allocated region as (x, y, w, h), or None on failure.
         """
 
+        # We search for regions with padding "2 pixels wide" around them.
+        # This is to avoid artifacts due to linear filtering in the shader.
+        search_width = width + 2
+        search_height = height + 2
         # Find best place to fit it
         best_height = best_width = np.inf
         best_index = -1
         for i in range(len(self._atlas_nodes)):
-            y = self._fit_region(i, width, height)
+            y = self._fit_region(i, search_width, search_height)
             if y >= 0:
                 node = self._atlas_nodes[i]
-                if y + height < best_height or (
-                    y + height == best_height and node[2] < best_width
+                if y + search_height < best_height or (
+                    y + search_height == best_height and node[2] < best_width
                 ):
-                    best_height = y + height
+                    best_height = y + search_height
                     best_index = i
                     best_width = node[2]
-                    region = node[0], y, width, height
+                    region = node[0], y, search_width, search_height
         if best_index == -1:
             return None
 
         # Create the node and update the data structure
-        node = region[0], region[1] + height, width
+        node = region[0], region[1] + search_height, search_width
         self._atlas_nodes.insert(best_index, node)
         i = best_index + 1
         while i < len(self._atlas_nodes):
@@ -107,6 +111,7 @@ class RectPacker:
             else:
                 i += 1
 
+        region = region[0], region[1] + 1, width, height
         return region
 
     def _fit_region(self, index, width, height):
@@ -215,11 +220,13 @@ class GlyphAtlas(RectPacker):
             # Keep the array, we'll repack only
             array1 = self._array.copy()
             array2 = self._array
-            array2.fill(0)
+            # REVERT THIS CHANGE BACK TO 0
+            array2.fill(128)
         else:
             # Create new array
             array1 = self._array
-            array2 = np.zeros((size, size), np.uint8)
+            # REVERT THE FILL VALUE BACK TO 0
+            array2 = np.full((size, size), fill_value=128, dtype=np.uint8)
             self._array = array2
 
         # We're going to pack it up fresh
