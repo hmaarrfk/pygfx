@@ -71,7 +71,7 @@ class RectPacker:
                     best_height = y + height
                     best_index = i
                     best_width = node[2]
-                    region = node[0], y, width, width
+                    region = node[0], y, width, height
         if best_index == -1:
             return None
 
@@ -177,6 +177,11 @@ class GlyphAtlas(RectPacker):
         self._set_new_glyphs_array(self._initial_array_size)
 
     def _select_region(self, width, height):
+        # A glyph atlas is a special case of a rectangle packer.
+        # Unlike a regular rectangle packer, we need to ensure we have
+        # padding around each glyph in order for interpolation not to
+        # cause characters to bleed into each other.
+
         # We search for regions with padding "2 pixels wide" around them.
         # This is to avoid artifacts due to linear filtering in the shader.
         region_with_padding = super()._select_region(width + 2, height + 2)
@@ -221,15 +226,24 @@ class GlyphAtlas(RectPacker):
         """
         assert size > 0
 
+        # Set the fill value to 255 to debug the text. it should create
+        # slight artifacts around the text, but it should be very hard to see.
+        # However our tests should be able to see it
+        fill_value = 255
         if size == self._array.shape[0]:
             # Keep the array, we'll repack only
             array1 = self._array.copy()
             array2 = self._array
-            array2.fill(0)
+            array2.fill(fill_value)
         else:
             # Create new array
             array1 = self._array
-            array2 = np.zeros((size, size), dtype=np.uint8)
+            if array1 is not None and array1.shape != (0,):
+                np.testing.assert_array_equal(array1[0, :], fill_value)
+                np.testing.assert_array_equal(array1[:, 0], fill_value)
+                np.testing.assert_array_equal(array1[-1, :], fill_value)
+                np.testing.assert_array_equal(array1[:, -1], fill_value)
+            array2 = np.full((size, size), fill_value=fill_value, dtype=np.uint8)
             self._array = array2
 
         # We're going to pack it up fresh
@@ -241,19 +255,26 @@ class GlyphAtlas(RectPacker):
             info = self._infos[index]
             x1, y1 = info["origin"]
             w1, h1 = info["size"]
-            if not w1 or not h1:
-                continue  # freed region
+            # An index can have 0 size, for example the
+            # character 32, a non-printable character.
+            # has a glyph that is empty, but it should still
+            # take space and have an index in our atlas.
+            if index in self._free_indices:
+                # freed region
+                continue
             x2, y2, w2, h2 = self._select_region(w1, h1)
             info["origin"] = x2, y2
             array2[y2 : y2 + h2, x2 : x2 + w2] = array1[y1 : y1 + h1, x1 : x1 + w1]
             # 2 pixel padding for the allocated area
             allocated_area += (w2 + 2) * (h2 + 2)
 
-        assert allocated_area == self._allocated_area
+        assert allocated_area == self._allocated_area, (
+            f"{allocated_area} != {self._allocated_area}"
+        )
 
         self._free_area = 0
         self._allocated_area = allocated_area
-        self._free_indices.clear()
+        # self._free_indices.clear()
 
     def allocate_region(self, w, h):
         """Allocate a region of the given size. Returns the index for
