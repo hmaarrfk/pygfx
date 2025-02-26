@@ -58,30 +58,25 @@ class RectPacker:
         """Find a free region of given size and allocate it.
         Returns the newly allocated region as (x, y, w, h), or None on failure.
         """
-
-        # We search for regions with padding "2 pixels wide" around them.
-        # This is to avoid artifacts due to linear filtering in the shader.
-        search_width = width + 2
-        search_height = height + 2
         # Find best place to fit it
         best_height = best_width = np.inf
         best_index = -1
         for i in range(len(self._atlas_nodes)):
-            y = self._fit_region(i, search_width, search_height)
+            y = self._fit_region(i, width, height)
             if y >= 0:
                 node = self._atlas_nodes[i]
-                if y + search_height < best_height or (
-                    y + search_height == best_height and node[2] < best_width
+                if y + height < best_height or (
+                    y + height == best_height and node[2] < best_width
                 ):
-                    best_height = y + search_height
+                    best_height = y + height
                     best_index = i
                     best_width = node[2]
-                    region = node[0], y, search_width, search_height
+                    region = node[0], y, width, width
         if best_index == -1:
             return None
 
         # Create the node and update the data structure
-        node = region[0], region[1] + search_height, search_width
+        node = region[0], region[1] + height, width
         self._atlas_nodes.insert(best_index, node)
         i = best_index + 1
         while i < len(self._atlas_nodes):
@@ -111,10 +106,7 @@ class RectPacker:
             else:
                 i += 1
 
-        # Return a region with a 1 pixel offset so that the user
-        # may assume zero padding outside of it
-        useful_region = region[0] + 1, region[1] + 1, width, height
-        return useful_region
+        return region
 
     def _fit_region(self, index, width, height):
         """Test if region (width, height) fit into self._atlas_nodes[index].
@@ -184,6 +176,17 @@ class GlyphAtlas(RectPacker):
         self._set_new_infos_array(initial_infos_size)
         self._set_new_glyphs_array(self._initial_array_size)
 
+    def _select_region(self, width, height):
+        # We search for regions with padding "2 pixels wide" around them.
+        # This is to avoid artifacts due to linear filtering in the shader.
+        region_with_padding = super()._select_region(width + 2, height + 2)
+        if region_with_padding is None:
+            return None
+        # Return a region with a 1 pixel offset so that the user
+        # may assume zero padding outside of it
+        region = region_with_padding[0] + 1, region_with_padding[1] + 1, width, height
+        return region
+
     @property
     def region_count(self):
         """The number of regions allocated (excluding freed)."""
@@ -243,7 +246,8 @@ class GlyphAtlas(RectPacker):
             x2, y2, w2, h2 = self._select_region(w1, h1)
             info["origin"] = x2, y2
             array2[y2 : y2 + h2, x2 : x2 + w2] = array1[y1 : y1 + h1, x1 : x1 + w1]
-            allocated_area += w2 * h2
+            # 2 pixel padding for the allocated area
+            allocated_area += (w2 + 2) * (h2 + 2)
 
         assert allocated_area == self._allocated_area
 
@@ -301,7 +305,7 @@ class GlyphAtlas(RectPacker):
 
             # Bookkeeping
             self._region_count += 1
-            self._allocated_area += w * h
+            self._allocated_area += (w + 2) * (h + 2)
 
             return index
 
@@ -368,8 +372,8 @@ class GlyphAtlas(RectPacker):
             self._free_indices.add(index)
             # Bookkeeping
             self._region_count -= 1
-            self._free_area += w * h
-            self._allocated_area -= w * h
+            self._free_area += (w + 2) * (h + 2)
+            self._allocated_area -= (w + 2) * (h + 2)
             # Clear hash data
             hash = self._index2hash.pop(index, None)
             if hash is not None:
