@@ -146,6 +146,12 @@ class GlyphAtlas(RectPacker):
         self._hash2index = {}  # hash -> index
         self._index2hash = {}
 
+        # While a padding of 1 pixel (0.5 pixel on each side)
+        # should be perfectly ok
+        # I've seen that on the CI it seems to cause issues with artefacts
+        # thus I'm leaving in a padding of 2, 1 full pixel on each side.
+        self._padding = 2
+
         # Indices monotonically increase, but can also be reused from freed regions
         self._index_counter = 0
         self._free_indices = set()
@@ -188,20 +194,17 @@ class GlyphAtlas(RectPacker):
         # and return a "1 pixel offset" from the region that it receives
         # This is to avoid artifacts due to linear filtering in the shader.
 
-        # While a padding of 1 pixel (0.5 pixel on each side)
-        # should be perfectly ok
-        # I've seen that on the CI it seems to cause issues with artefacts
-        # thus I'm leaving in a padding of 2, 1 full pixel on each side.
-        padding = 2
-        half_padding = padding // 2
-        padded_region = super()._select_region(width + padding, height + padding)
+        padded_region = super()._select_region(
+            width + self._padding,
+            height + self._padding
+        )
         if padded_region is None:
             return None
         # Return a region with a 1 pixel offset so that the user
         # may assume zero padding outside of it
         region = (
-            padded_region[0] + half_padding,
-            padded_region[1] + half_padding,
+            padded_region[0] + self._padding // 2,
+            padded_region[1] + self._padding // 2,
             width,
             height,
         )
@@ -256,8 +259,11 @@ class GlyphAtlas(RectPacker):
             if array1 is not None and array1.shape != (0,):
                 # With half pixel padding, we can only check the fill value
                 # on the "0" edge
-                np.testing.assert_array_equal(array1[0, :], fill_value)
-                np.testing.assert_array_equal(array1[:, 0], fill_value)
+                np.testing.assert_array_equal(array1[:self._padding // 2, :], fill_value)
+                np.testing.assert_array_equal(array1[:, :self._padding // 2], fill_value)
+                if self._padding > 2:
+                    np.testing.assert_array_equal(array1[-self._padding // 2:, :], fill_value)
+                    np.testing.assert_array_equal(array1[:, -self._padding // 2:], fill_value)
             array2 = np.full((size, size), fill_value=fill_value, dtype=np.uint8)
             self._array = array2
 
@@ -281,7 +287,7 @@ class GlyphAtlas(RectPacker):
             info["origin"] = x2, y2
             array2[y2 : y2 + h2, x2 : x2 + w2] = array1[y1 : y1 + h1, x1 : x1 + w1]
             # 2 pixel padding for the allocated area
-            allocated_area += (w2 + 1) * (h2 + 1)
+            allocated_area += (w2 + self._padding) * (h2 + self._padding)
 
         assert allocated_area == self._allocated_area, (
             f"{allocated_area} != {self._allocated_area}"
@@ -341,7 +347,7 @@ class GlyphAtlas(RectPacker):
 
             # Bookkeeping
             self._region_count += 1
-            self._allocated_area += (w + 1) * (h + 1)
+            self._allocated_area += (w + self._padding) * (h + self._padding)
 
             return index
 
@@ -408,8 +414,9 @@ class GlyphAtlas(RectPacker):
             self._free_indices.add(index)
             # Bookkeeping
             self._region_count -= 1
-            self._free_area += (w + 1) * (h + 1)
-            self._allocated_area -= (w + 1) * (h + 1)
+            area = (w + self._padding) * (h + self._padding)
+            self._free_area += area
+            self._allocated_area -= area
             # Clear hash data
             hash = self._index2hash.pop(index, None)
             if hash is not None:
