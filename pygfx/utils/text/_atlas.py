@@ -187,12 +187,24 @@ class GlyphAtlas(RectPacker):
         # wider, and 1 pixel taller from the underlying atlas
         # and return a "1 pixel offset" from the region that it receives
         # This is to avoid artifacts due to linear filtering in the shader.
-        padded_region = super()._select_region(width + 1, height + 1)
+
+        # While a padding of 1 pixel (0.5 pixel on each side)
+        # should be perfectly ok
+        # I've seen that on the CI it seems to cause issues with artefacts
+        # thus I'm leaving in a padding of 2, 1 full pixel on each side.
+        padding = 2
+        half_padding = padding // 2
+        padded_region = super()._select_region(width + padding, height + padding)
         if padded_region is None:
             return None
         # Return a region with a 1 pixel offset so that the user
         # may assume zero padding outside of it
-        region = padded_region[0] + 1, padded_region[1] + 1, width, height
+        region = (
+            padded_region[0] + half_padding,
+            padded_region[1] + half_padding,
+            width,
+            height,
+        )
         return region
 
     @property
