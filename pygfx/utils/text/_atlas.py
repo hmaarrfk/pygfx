@@ -149,7 +149,12 @@ class GlyphAtlas(RectPacker):
         # While a padding of 1 pixel (0.5 pixel on each side)
         # should be perfectly ok
         # I've seen that on the CI it seems to cause issues with artefacts
-        # thus I'm leaving in a padding of 2, 1 full pixel on each side.
+        # thus i'm leaving this as a parameter so we can more easily adjust
+        # it and see the effects of the general padding strategy
+        # A padding of "1" is permissible to avoid the artifacts
+        # since we use "repeat" sampling for the shader
+        # giving us a symmetric padding around each glyph, even those at the
+        # very bounds of the atlas
         self._padding = 1
 
         # Indices monotonically increase, but can also be reused from freed regions
@@ -255,6 +260,8 @@ class GlyphAtlas(RectPacker):
         else:
             # Create new array
             array1 = self._array
+            # TODO: before merging, we can remove this check that ensures
+            # that the padding is 0 on the edges of the array
             if array1 is not None and array1.shape != (0,):
                 # With half pixel padding, we can only check the fill value
                 # on the "0" edge
