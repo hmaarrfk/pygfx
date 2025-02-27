@@ -195,8 +195,7 @@ class GlyphAtlas(RectPacker):
         # This is to avoid artifacts due to linear filtering in the shader.
 
         padded_region = super()._select_region(
-            width + self._padding,
-            height + self._padding
+            width + self._padding, height + self._padding
         )
         if padded_region is None:
             return None
@@ -259,11 +258,19 @@ class GlyphAtlas(RectPacker):
             if array1 is not None and array1.shape != (0,):
                 # With half pixel padding, we can only check the fill value
                 # on the "0" edge
-                np.testing.assert_array_equal(array1[:self._padding // 2, :], fill_value)
-                np.testing.assert_array_equal(array1[:, :self._padding // 2], fill_value)
+                np.testing.assert_array_equal(
+                    array1[: self._padding // 2, :], fill_value
+                )
+                np.testing.assert_array_equal(
+                    array1[:, : self._padding // 2], fill_value
+                )
                 if self._padding > 2:
-                    np.testing.assert_array_equal(array1[-self._padding // 2:, :], fill_value)
-                    np.testing.assert_array_equal(array1[:, -self._padding // 2:], fill_value)
+                    np.testing.assert_array_equal(
+                        array1[-self._padding // 2 :, :], fill_value
+                    )
+                    np.testing.assert_array_equal(
+                        array1[:, -self._padding // 2 :], fill_value
+                    )
             array2 = np.full((size, size), fill_value=fill_value, dtype=np.uint8)
             self._array = array2
 
