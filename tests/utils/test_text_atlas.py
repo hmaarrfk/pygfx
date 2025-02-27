@@ -60,8 +60,9 @@ def test_atlas_resize():
     prev_array = atlas._array
 
     # Allocate 4 regions
-    for _i in range(4):
-        atlas.allocate_region(6, 6)
+    for i in range(4):
+        index = atlas.allocate_region(7, 7)
+        atlas.set_region(index, i + 1)
 
     # This should just fit
     assert atlas.total_area == 256
@@ -69,7 +70,7 @@ def test_atlas_resize():
     assert atlas._array is prev_array
 
     # Allocate another
-    atlas.allocate_region(6, 6)
+    atlas.allocate_region(7, 7)
 
     assert atlas.total_area == 576
     assert atlas.allocated_area == 256 + 64
@@ -80,7 +81,7 @@ def test_atlas_resize():
     # We can fit 9 regions of 6x6 with 2 padding (8x8 total size) in it.
     # So 4 more.
     for _i in range(4):
-        atlas.allocate_region(6, 6)
+        atlas.allocate_region(7, 7)
 
     # Again, it should just fit
     assert atlas.total_area == 576
@@ -88,7 +89,7 @@ def test_atlas_resize():
     assert atlas._array is prev_array
 
     # Allocate another
-    atlas.allocate_region(6, 6)
+    atlas.allocate_region(7, 7)
 
     # Now the array was resized to 40x40
     assert atlas.total_area == 1024
@@ -115,7 +116,7 @@ def test_atlas_alloc_resize_with_freeing():
     # Allocate 9 regions
     # 6x6 regions with 2 pixel padding (8x8 total size)
     for _i in range(9):
-        atlas.allocate_region(6, 6)
+        atlas.allocate_region(7, 7)
 
     # This should just fit
     assert atlas.total_area == 576
@@ -128,7 +129,7 @@ def test_atlas_alloc_resize_with_freeing():
     assert atlas.allocated_area == 5 * 64
 
     # Allocate another
-    atlas.allocate_region(6, 6)
+    atlas.allocate_region(7, 7)
 
     # Now the atlas was repacked, but not resized
     assert atlas.total_area == 576
@@ -143,7 +144,7 @@ def test_atlas_alloc_resize_with_freeing():
 
     # Allocate 6 regions. Now we have 12 regions in total, which causes a resize.
     for _i in range(6):
-        atlas.allocate_region(6, 6)
+        atlas.allocate_region(7, 7)
     assert atlas.region_count == 12
 
     # Now the array was resized to 40x40
@@ -233,10 +234,10 @@ def test_atlas_alloc2():
     assert atlas.allocated_area == 0
     assert atlas.total_area == 256
 
-    # Allocate 1000 48x48 + 2 padding (50x50) regions
+    # Allocate 1000 49x49 + 2 padding (50x50) regions
     indices1 = []
     for _i in range(1000):
-        index = atlas.allocate_region(48, 48)
+        index = atlas.allocate_region(49, 49)
         indices1.append(index)
 
     assert atlas.region_count == 1000
@@ -254,7 +255,7 @@ def test_atlas_alloc2():
     # Allocate 500
     indices2 = []
     for _i in range(500):
-        index = atlas.allocate_region(48, 48)
+        index = atlas.allocate_region(49, 49)
         indices2.append(index)
 
     assert atlas.region_count == 1000
