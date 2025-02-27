@@ -150,7 +150,7 @@ class GlyphAtlas(RectPacker):
         # should be perfectly ok
         # I've seen that on the CI it seems to cause issues with artefacts
         # thus I'm leaving in a padding of 2, 1 full pixel on each side.
-        self._padding = 2
+        self._padding = 1
 
         # Indices monotonically increase, but can also be reused from freed regions
         self._index_counter = 0
