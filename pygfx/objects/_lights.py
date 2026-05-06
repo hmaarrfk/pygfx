@@ -126,6 +126,10 @@ class Light(WorldObject):
     @cast_shadow.setter
     def cast_shadow(self, value: bool):
         self.uniform_buffer.data["cast_shadow"] = bool(value)
+        # Lights typically have no geometry (so they don't enter the
+        # shadow-caster index), but call the hook regardless to keep the
+        # invariant that any cast_shadow change refreshes the index.
+        self._refresh_caster_status()
 
 
 class AmbientLight(Light):
@@ -142,6 +146,8 @@ class AmbientLight(Light):
         scene.
 
     """
+
+    _subtree_light_kind = "ambient"
 
     def __init__(self, color="#ffffff", intensity=0.2):
         super().__init__(color, intensity)
@@ -176,6 +182,8 @@ class PointLight(Light):
     profile.
 
     """
+
+    _subtree_light_kind = "point"
 
     uniform_type = dict(
         Light.uniform_type,
@@ -273,6 +281,8 @@ class DirectionalLight(Light):
 
     """
 
+    _subtree_light_kind = "directional"
+
     uniform_type = dict(
         Light.uniform_type,
         direction="4xf4",
@@ -358,6 +368,8 @@ class SpotLight(Light):
     profile.
 
     """
+
+    _subtree_light_kind = "spot"
 
     uniform_type = dict(
         Light.uniform_type,

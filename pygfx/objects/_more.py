@@ -23,6 +23,11 @@ class Group(WorldObject):
 
     """
 
+    # Marker for the incremental scene-graph index: descendants treat
+    # ``Group`` (and its subclasses, e.g. ``Scene``) as the source of
+    # their ``group_order`` (the closest Group ancestor's render_order).
+    _subtree_is_group = True
+
     def __init__(self, *, visible=True, name=""):
         super().__init__(visible=visible, name=name)
 

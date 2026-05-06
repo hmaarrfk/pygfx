@@ -78,6 +78,121 @@ class IdProvider:
 id_provider = IdProvider()
 
 
+class _SubtreeIndex:
+    """Categorized flat lists of *descendants* of a world object.
+
+    Each ``WorldObject`` owns one of these. ``self`` is **not** an entry of
+    its own index (only its strict descendants are) — this keeps the index
+    free of reference cycles, so removed subtrees become unreachable as
+    soon as their parents drop them, without needing cyclic GC.
+
+    The renderer iterates these flat lists at render time instead of
+    walking the scene graph; the lists are kept in sync incrementally by
+    ``WorldObject.add``/``remove`` and by the relevant property setters
+    (``cast_shadow``, ``geometry``, ``material``).
+
+    The lists must be in scene-graph (DFS pre-order) order, because:
+    - ``all_objects`` order drives renderer-id assignment, and
+    - ``renderable`` order is the stable tiebreak for objects with equal
+      sort keys (e.g. coplanar transparent objects), so it must match what
+      the old depth-first walk produced.
+
+    Appending a freshly-added subtree keeps DFS order **as long as it is
+    grafted at the depth-first tail** (the common case: building a scene by
+    successive ``add``s, or filling a group before moving on). A non-tail
+    insertion — adding to a group that already has later siblings, or using
+    ``add(..., before=...)`` — would put entries in the wrong place, so it
+    instead sets ``_dfs_dirty`` and the order is rebuilt lazily on the next
+    render (see ``WorldObject._ensure_subtree_index_order``). This keeps the
+    no-traversal fast path for steady-state render loops while staying
+    correct under arbitrary mutation.
+
+    All stored values are ``None``; the dicts act as ordered sets.
+    """
+
+    __slots__ = (
+        "_dfs_dirty",
+        "all_objects",
+        "lights_ambient",
+        "lights_directional",
+        "lights_point",
+        "lights_spot",
+        "renderable",
+        "shadow_casters",
+    )
+
+    def __init__(self):
+        self.all_objects = {}
+        self.lights_point = {}
+        self.lights_directional = {}
+        self.lights_spot = {}
+        self.lights_ambient = {}
+        self.shadow_casters = {}
+        self.renderable = {}
+        # Set when a non-DFS-tail insertion leaves the lists out of
+        # scene-graph order; cleared by a lazy reorder at render time.
+        self._dfs_dirty = False
+
+    def add_object(self, obj: "WorldObject") -> None:
+        """Insert ``obj`` into the relevant categorized lists."""
+        self.all_objects[obj] = None
+        kind = obj._subtree_light_kind
+        if kind == "point":
+            self.lights_point[obj] = None
+        elif kind == "directional":
+            self.lights_directional[obj] = None
+        elif kind == "spot":
+            self.lights_spot[obj] = None
+        elif kind == "ambient":
+            self.lights_ambient[obj] = None
+        if obj._caster_in_index:
+            self.shadow_casters[obj] = None
+        if obj._renderable_in_index:
+            self.renderable[obj] = None
+
+    def remove_object(self, obj: "WorldObject") -> None:
+        """Remove ``obj`` from all categorized lists (no-op if absent)."""
+        self.all_objects.pop(obj, None)
+        kind = obj._subtree_light_kind
+        if kind == "point":
+            self.lights_point.pop(obj, None)
+        elif kind == "directional":
+            self.lights_directional.pop(obj, None)
+        elif kind == "spot":
+            self.lights_spot.pop(obj, None)
+        elif kind == "ambient":
+            self.lights_ambient.pop(obj, None)
+        self.shadow_casters.pop(obj, None)
+        self.renderable.pop(obj, None)
+
+    def merge_in(self, other: "_SubtreeIndex") -> None:
+        """Merge all of ``other``'s entries into ``self`` (preserving order)."""
+        self.all_objects.update(other.all_objects)
+        self.lights_point.update(other.lights_point)
+        self.lights_directional.update(other.lights_directional)
+        self.lights_spot.update(other.lights_spot)
+        self.lights_ambient.update(other.lights_ambient)
+        self.shadow_casters.update(other.shadow_casters)
+        self.renderable.update(other.renderable)
+
+    def remove_in(self, other: "_SubtreeIndex") -> None:
+        """Remove all of ``other``'s entries from ``self``."""
+        for ob in other.all_objects:
+            self.all_objects.pop(ob, None)
+        for ob in other.lights_point:
+            self.lights_point.pop(ob, None)
+        for ob in other.lights_directional:
+            self.lights_directional.pop(ob, None)
+        for ob in other.lights_spot:
+            self.lights_spot.pop(ob, None)
+        for ob in other.lights_ambient:
+            self.lights_ambient.pop(ob, None)
+        for ob in other.shadow_casters:
+            self.shadow_casters.pop(ob, None)
+        for ob in other.renderable:
+            self.renderable.pop(ob, None)
+
+
 class WorldObject(EventTarget, Trackable):
     """Base class for objects.
 
@@ -120,6 +235,18 @@ class WorldObject(EventTarget, Trackable):
 
     _FORWARD_IS_MINUS_Z = False  # Default is +Z (lights and cameras use -Z)
 
+    # Marker used by the incremental scene-graph index. Light subclasses set
+    # this to one of "point", "directional", "spot", "ambient" so the index
+    # can categorize them without isinstance checks (and without circular
+    # imports between _base.py and _lights.py).
+    _subtree_light_kind: ClassVar[str | None] = None
+
+    # Marker used by the index for ``Group``-aware ``render_order``
+    # propagation. ``Group`` (and its subclasses, e.g. ``Scene``) sets this
+    # to True so child objects can resolve the closest Group ancestor
+    # without isinstance checks.
+    _subtree_is_group: ClassVar[bool] = False
+
     _id = 0
 
     # The uniform type describes the structured info for this object, which represents
@@ -152,6 +279,17 @@ class WorldObject(EventTarget, Trackable):
 
         #: Subtrees of the scene graph that depend on this object.
         self._children: List[WorldObject] = []
+
+        # Incremental scene-graph index state. Initialised lazily after
+        # all property setters have run (some setters update the index, so
+        # we need them to be no-ops until ``_subtree_index`` is created).
+        self._subtree_index: _SubtreeIndex | None = None
+        self._caster_in_index = False
+        self._renderable_in_index = False
+        self._effective_visible = True
+        self._closest_group_ancestor_ref: weakref.ReferenceType[WorldObject] | None = (
+            None
+        )
 
         self.geometry = geometry
         self.material = material
@@ -198,6 +336,15 @@ class WorldObject(EventTarget, Trackable):
 
         self.name = name
 
+        # Now bootstrap the subtree index. By convention our index holds
+        # only our *descendants*, not ourselves; ``self`` is registered
+        # into ancestor indices when added to a parent. Keeping self out
+        # of its own index prevents reference cycles.
+        self._subtree_index = _SubtreeIndex()
+        self._caster_in_index = self._compute_is_shadow_caster()
+        self._renderable_in_index = self._material is not None
+        self._effective_visible = bool(self._store.visible)
+
     def _assign_renderer_id(self, id):
         if self._renderer_id == 0:
             assert id > 0
@@ -227,6 +374,203 @@ class WorldObject(EventTarget, Trackable):
             casting="unsafe",
         )
         self.uniform_buffer.update_full()
+
+    # ----- Incremental scene-graph index helpers -----
+
+    def _compute_is_shadow_caster(self) -> bool:
+        """Whether self qualifies as a shadow caster right now."""
+        return bool(self.cast_shadow) and self._store.geometry is not None
+
+    def _iter_self_and_ancestors(self):
+        """Yield self, then each ancestor walking up the parent chain."""
+        node = self
+        while node is not None:
+            yield node
+            parent_ref = node._parent
+            node = parent_ref() if parent_ref is not None else None
+
+    def _iter_ancestors(self):
+        """Yield each strict ancestor (parent, grandparent, ...)."""
+        parent_ref = self._parent
+        node = parent_ref() if parent_ref is not None else None
+        while node is not None:
+            yield node
+            parent_ref = node._parent
+            node = parent_ref() if parent_ref is not None else None
+
+    def _refresh_caster_status(self) -> None:
+        """Recompute self's shadow-caster status and propagate to every
+        ancestor's ``shadow_casters`` list."""
+        if self._subtree_index is None:
+            return  # still in __init__, nothing to register against
+        new_caster = self._compute_is_shadow_caster()
+        if new_caster == self._caster_in_index:
+            return
+        self._caster_in_index = new_caster
+        for ancestor in self._iter_ancestors():
+            casters = ancestor._subtree_index.shadow_casters
+            if new_caster:
+                casters[self] = None
+            else:
+                casters.pop(self, None)
+
+    def _refresh_renderable_status(self) -> None:
+        """Recompute self's renderable status and propagate to every
+        ancestor's ``renderable`` list."""
+        if self._subtree_index is None:
+            return
+        new_renderable = self._material is not None
+        if new_renderable == self._renderable_in_index:
+            return
+        self._renderable_in_index = new_renderable
+        for ancestor in self._iter_ancestors():
+            renderable = ancestor._subtree_index.renderable
+            if new_renderable:
+                renderable[self] = None
+            else:
+                renderable.pop(self, None)
+
+    def _refresh_visibility_subtree(self) -> None:
+        """Recompute ``_effective_visible`` for self and, if it changed,
+        cascade to descendants. Called from the ``visible`` setter."""
+        if self._subtree_index is None:
+            return
+        parent = self.parent
+        parent_eff = parent._effective_visible if parent is not None else True
+        new_eff = parent_eff and bool(self._store.visible)
+        if new_eff == self._effective_visible:
+            return
+        self._effective_visible = new_eff
+        for child in self._children:
+            child._refresh_visibility_subtree()
+
+    def _cascade_topology_change(
+        self,
+        parent_eff_visible: bool,
+        parent_closest_group_ref: "weakref.ReferenceType[WorldObject] | None",
+    ) -> None:
+        """Recompute ``_effective_visible`` and ``_closest_group_ancestor_ref``
+        for self and all descendants.
+
+        Called when a subtree is attached to a new parent, or detached.
+        The caller passes the parent's effective-visibility and the
+        weakref to the parent's closest-Group-ancestor *for self*. (If
+        the new parent is itself a Group, the parent is self's closest
+        Group ancestor.)
+        """
+        self._effective_visible = parent_eff_visible and bool(self._store.visible)
+        self._closest_group_ancestor_ref = parent_closest_group_ref
+
+        if self._subtree_is_group:
+            child_group_ref = weakref.ref(self)
+        else:
+            child_group_ref = parent_closest_group_ref
+
+        for child in self._children:
+            child._cascade_topology_change(self._effective_visible, child_group_ref)
+
+    def _group_ref_for_my_children(
+        self,
+    ) -> "weakref.ReferenceType[WorldObject] | None":
+        """The closest-Group-ancestor weakref to give to a child being
+        attached under self.
+
+        If self is a Group, that's a weakref to self; otherwise it's
+        whatever self's own closest-Group-ancestor is.
+        """
+        if self._subtree_is_group:
+            return weakref.ref(self)
+        return self._closest_group_ancestor_ref
+
+    def _attach_subtree_under(self, parent: "WorldObject") -> None:
+        """Apply the index/visibility/group bookkeeping for adopting
+        ``self`` (with its existing subtree) as a freshly-added child of
+        ``parent``.
+
+        Precondition: ``self._parent`` already points to ``parent`` and
+        ``self`` is in ``parent._children``.
+        """
+        # Push self + its descendants up through every ancestor's index.
+        # ``self`` is registered explicitly because it is not present in
+        # its own ``_subtree_index`` (descendants only).
+        #
+        # Appending keeps DFS pre-order only while the new subtree is
+        # grafted at the depth-first tail, i.e. every node on the path from
+        # the ancestor down to ``self`` is the last child of its parent.
+        # ``at_tail`` tracks that; once it fails for an ancestor, that
+        # ancestor (and every higher one) is marked dirty for a lazy
+        # reorder at render time.
+        own_index = self._subtree_index
+        at_tail = True
+        child = self
+        for ancestor in parent._iter_self_and_ancestors():
+            anc_index = ancestor._subtree_index
+            anc_index.add_object(self)
+            anc_index.merge_in(own_index)
+            if not (at_tail and ancestor._children[-1] is child):
+                at_tail = False
+                anc_index._dfs_dirty = True
+            child = ancestor
+
+        # Cascade visibility + group ancestor down through the new subtree.
+        self._cascade_topology_change(
+            parent._effective_visible, parent._group_ref_for_my_children()
+        )
+
+    def _detach_subtree_from(self, parent: "WorldObject") -> None:
+        """Apply the index/visibility/group bookkeeping for removing
+        ``self`` (with its subtree) from ``parent``.
+
+        Precondition: ``self`` has been removed from ``parent._children``
+        but ``self._parent`` has not yet been cleared.
+        """
+        own_index = self._subtree_index
+        for ancestor in parent._iter_self_and_ancestors():
+            anc_index = ancestor._subtree_index
+            anc_index.remove_object(self)
+            anc_index.remove_in(own_index)
+
+        # Cascade visibility + group ancestor as if self is now a root.
+        self._cascade_topology_change(True, None)
+
+    def _ensure_subtree_index_order(self) -> None:
+        """Rebuild this object's index lists in scene-graph (DFS pre-order)
+        order if a non-tail insertion left them dirty.
+
+        This is a no-op in the common case — appends at the depth-first tail
+        keep the lists ordered, so ``_dfs_dirty`` stays clear and a
+        steady-state render loop never walks the graph. Removals preserve the
+        relative order of the remaining entries, so only insertions can dirty
+        the index. When dirty, this costs one O(N) walk of the subtree, paid
+        once on the first render after the mutation.
+        """
+        index = self._subtree_index
+        if index is None or not index._dfs_dirty:
+            return
+
+        # Depth-first pre-order over the descendants (self is excluded from
+        # its own index by design).
+        ordered = {}
+        stack = self._children[::-1]
+        while stack:
+            node = stack.pop()
+            ordered[node] = None
+            children = node._children
+            if children:
+                stack.extend(children[::-1])
+
+        # Reorder each categorized list to follow ``ordered`` while keeping
+        # its existing membership (built incrementally and already correct).
+        index.all_objects = ordered
+        index.renderable = {o: None for o in ordered if o in index.renderable}
+        index.shadow_casters = {o: None for o in ordered if o in index.shadow_casters}
+        index.lights_point = {o: None for o in ordered if o in index.lights_point}
+        index.lights_directional = {
+            o: None for o in ordered if o in index.lights_directional
+        }
+        index.lights_spot = {o: None for o in ordered if o in index.lights_spot}
+        index.lights_ambient = {o: None for o in ordered if o in index.lights_ambient}
+        index._dfs_dirty = False
 
     def __repr__(self):
         return f"<pygfx.{self.__class__.__name__} {self.name} at {hex(id(self))}>"
@@ -279,6 +623,7 @@ class WorldObject(EventTarget, Trackable):
     @visible.setter
     def visible(self, visible: bool) -> None:
         self._store.visible = bool(visible)
+        self._refresh_visibility_subtree()
 
     @property
     def render_order(self) -> float:
@@ -329,6 +674,8 @@ class WorldObject(EventTarget, Trackable):
                 f"WorldObject.geometry must be a Geometry object or None, not {geometry!r}"
             )
         self._store.geometry = geometry
+        # Shadow-caster eligibility depends on geometry presence.
+        self._refresh_caster_status()
 
     @property
     def material(self) -> Material | None:
@@ -345,6 +692,8 @@ class WorldObject(EventTarget, Trackable):
                 f"WorldObject.geometry must be a Geometry object or None, not {material!r}"
             )
         self._material = material
+        # Renderable eligibility depends on having a material.
+        self._refresh_renderable_status()
 
     @property
     def cast_shadow(self) -> bool:
@@ -355,6 +704,7 @@ class WorldObject(EventTarget, Trackable):
     @cast_shadow.setter
     def cast_shadow(self, value: bool) -> None:
         self._cast_shadow = bool(value)
+        self._refresh_caster_status()
 
     @property
     def receive_shadow(self) -> bool:
@@ -452,6 +802,12 @@ class WorldObject(EventTarget, Trackable):
             if keep_world_matrix:
                 obj.world.matrix = transform_matrix
 
+            # Update the incremental scene-graph index. ``obj`` arrived as a
+            # root (its prior parent, if any, was removed above), so its
+            # ``_subtree_index`` already describes exactly the subtree to
+            # graft in.
+            obj._attach_subtree_under(self)
+
         return self
 
     def remove(self, *objects: WorldObject, keep_world_matrix: bool = False) -> None:
@@ -464,12 +820,16 @@ class WorldObject(EventTarget, Trackable):
                 logger.warning("Attempting to remove object that was not a child.")
                 continue
             else:
+                # Detach from the index BEFORE clearing the parent ref, so
+                # we can still walk the ancestor chain.
+                obj._detach_subtree_from(self)
                 obj._reset_parent(keep_world_matrix=keep_world_matrix)
 
     def clear(self, *, keep_world_matrix: bool = False) -> None:
         """Removes all children."""
 
         for child in self._children:
+            child._detach_subtree_from(self)
             child._reset_parent(keep_world_matrix=keep_world_matrix)
 
         self._children.clear()
