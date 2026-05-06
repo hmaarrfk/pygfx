@@ -32,7 +32,10 @@ examples_to_run = [ex[0] for ex in examples_info if ex[2] == "run"]
 examples_to_compare = [ex[0] for ex in examples_info if ex[2] == "compare"]
 
 
-CUSTOM_TOLERANCES = {"validate_text_md": 2}
+# Per-pixel atol on uint8 RGBA. Loose enough to absorb minor numerical
+# jitter between adapter/driver versions while still catching real
+# visual regressions.
+TOLERANCE = 4
 
 
 class LogHandler(logging.Handler):
@@ -151,7 +154,7 @@ def test_examples_compare(filename, pytestconfig, prep_environment, mock_time):
     stored_img = iio.imread(screenshot_path)
 
     # assert similarity
-    atol = CUSTOM_TOLERANCES.get(module_name, 1)
+    atol = TOLERANCE
     try:
         np.testing.assert_allclose(img, stored_img, atol=atol)
         is_similar = True

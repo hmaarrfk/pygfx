@@ -21,14 +21,6 @@ from ....objects import (
     WheelEvent,
     WindowEvent,
     WorldObject,
-    Group,
-)
-from ....objects._lights import (
-    Light,
-    PointLight,
-    DirectionalLight,
-    SpotLight,
-    AmbientLight,
 )
 from ....cameras import Camera
 from ....resources import Texture
@@ -78,82 +70,147 @@ class FlatScene:
         self.scene = scene
         self.add_scene(scene)
 
-    def _iter_scene(self, ob, group_order=0):
-        if not ob.visible:
-            return
-
-        if isinstance(ob, Group):
-            group_order = ob.render_order
-
-        yield ob, group_order
-        for child in ob._children:
-            yield from self._iter_scene(child, group_order)
-
     def add_scene(self, scene):
-        """Add a scene to the total flat scene. Is usually called just once."""
+        """Add a scene to the total flat scene. Is usually called just once.
+
+        This reads pre-categorized flat lists from ``scene._subtree_index``
+        (maintained incrementally by ``WorldObject.add``/``remove``) so
+        that no scene-graph traversal is needed at render time.
+
+        ``scene`` itself is **not** an entry of ``scene._subtree_index``
+        (the index covers descendants only, by design — see
+        ``_SubtreeIndex``), so we process ``scene`` separately and then
+        the descendants.
+        """
 
         # Put some attributes as vars in this namespace for faster access
         view_matrix = self._view_matrix
         wobject_wrappers = self._wobject_wrappers
+        # Restore DFS pre-order if a non-tail mutation left the index dirty
+        # (cheap no-op in steady-state render loops).
+        scene._ensure_subtree_index_order()
+        index = scene._subtree_index
 
-        for wobject, group_order in self._iter_scene(scene):
-            # Dereference the object in case its a weak proxy
+        # Visible lights, by type. Visibility is dynamic (and ancestors
+        # can hide a subtree), so we filter via the cached
+        # ``_effective_visible`` flag, which the index keeps up-to-date.
+        # The index excludes ``scene`` itself; if scene happens to be a
+        # light, fold its contribution in too.
+        scene_kind = scene._subtree_light_kind
+        scene_visible = scene._effective_visible
+
+        point_lights = self.lights["point_lights"]
+        if scene_visible and scene_kind == "point":
+            point_lights.append(scene)
+        for light in index.lights_point:
+            if light._effective_visible:
+                point_lights.append(light)
+
+        directional_lights = self.lights["directional_lights"]
+        if scene_visible and scene_kind == "directional":
+            directional_lights.append(scene)
+        for light in index.lights_directional:
+            if light._effective_visible:
+                directional_lights.append(light)
+
+        spot_lights = self.lights["spot_lights"]
+        if scene_visible and scene_kind == "spot":
+            spot_lights.append(scene)
+        for light in index.lights_spot:
+            if light._effective_visible:
+                spot_lights.append(light)
+
+        # Ambient lights: aggregate physical color contributions.
+        ambient_color = self.lights["ambient_color"]
+        if scene_visible and scene_kind == "ambient":
+            r, g, b = scene.color.to_physical()
+            ambient_color[0] += r * scene.intensity
+            ambient_color[1] += g * scene.intensity
+            ambient_color[2] += b * scene.intensity
+        for light in index.lights_ambient:
+            if not light._effective_visible:
+                continue
+            r, g, b = light.color.to_physical()
+            ambient_color[0] += r * light.intensity
+            ambient_color[1] += g * light.intensity
+            ambient_color[2] += b * light.intensity
+
+        # Per-object updates: assign renderer ids and refresh transforms
+        # for every visible object, including non-renderable ones (Groups,
+        # cameras nested in the scene, helpers, etc.) — matching the
+        # prior traversal-based behaviour.
+        if scene_visible:
+            scene_obj = scene._self()
+            self.object_count += scene_obj._assign_renderer_id(self.object_count + 1)
+            scene_obj._update_object()
+        for wobject in index.all_objects:
+            if not wobject._effective_visible:
+                continue
             wobject = wobject._self()
-            # Assign renderer id's
             self.object_count += wobject._assign_renderer_id(self.object_count + 1)
-            # Update things like transform and uniform buffers
             wobject._update_object()
 
-            # Light objects
-            if isinstance(wobject, Light):
-                if isinstance(wobject, PointLight):
-                    self.lights["point_lights"].append(wobject)
-                elif isinstance(wobject, DirectionalLight):
-                    self.lights["directional_lights"].append(wobject)
-                elif isinstance(wobject, SpotLight):
-                    self.lights["spot_lights"].append(wobject)
-                elif isinstance(wobject, AmbientLight):
-                    r, g, b = wobject.color.to_physical()
-                    ambient_color = self.lights["ambient_color"]
-                    ambient_color[0] += r * wobject.intensity
-                    ambient_color[1] += g * wobject.intensity
-                    ambient_color[2] += b * wobject.intensity
+        # Shadow casters (objects with cast_shadow and a geometry).
+        shadow_objects = self.shadow_objects
+        if scene_visible and scene._caster_in_index:
+            shadow_objects.append(scene)
+        for wobject in index.shadow_casters:
+            if wobject._effective_visible:
+                shadow_objects.append(wobject)
 
-            # Shadowable objects
-            if wobject.cast_shadow and wobject.geometry is not None:
-                self.shadow_objects.append(wobject)
+        # Renderable objects: build wrappers + sort keys. Iterate scene
+        # itself first (if applicable), then descendants from the index.
+        renderables_iter: "list" = []
+        if scene_visible and scene._renderable_in_index:
+            renderables_iter.append(scene)
+        for wobject in index.renderable:
+            if wobject._effective_visible:
+                renderables_iter.append(wobject)
 
-            # Renderable objects
+        for wobject in renderables_iter:
+            # ``group_order`` was previously propagated by the recursive
+            # walk; now we read it via the cached weakref to the closest
+            # Group ancestor (kept in sync on add/remove).
+            group_ref = wobject._closest_group_ancestor_ref
+            group_order = 0
+            if group_ref is not None:
+                group_ob = group_ref()
+                if group_ob is not None:
+                    group_order = group_ob.render_order
+
             material = wobject._material
-            if material is not None:
-                render_queue = material.render_queue
-                alpha_method = material.alpha_method
+            # ``renderable`` only contains objects with a material, but
+            # the flag is updated lazily via setters, so be defensive.
+            if material is None:
+                continue
 
-                # By default sort back-to-front, for correct blending.
-                dist_sort_sign = -1
-                # But for opaque queues, render front-to-back to avoid overdraw.
-                if 1500 < render_queue <= 2500:
-                    dist_sort_sign = 1
+            render_queue = material.render_queue
+            alpha_method = material.alpha_method
 
-                pass_type = alpha_method
+            # By default sort back-to-front, for correct blending.
+            dist_sort_sign = -1
+            # But for opaque queues, render front-to-back to avoid overdraw.
+            if 1500 < render_queue <= 2500:
+                dist_sort_sign = 1
 
-                # Get depth sorting flag. Note that use camera's view matrix, since the projection does not affect the depth order.
-                # It also means we can set projection=False optimalization.
-                # Also note that we look down -z.
-                if alpha_method == "weighted":
-                    dist_flag = 0
-                elif view_matrix is None:
-                    dist_flag = -1
-                else:
-                    relative_pos = la.vec_transform(
-                        wobject.world.position, view_matrix, projection=False
-                    )
-                    # Cam looks towards -z: negate to get distance
-                    distance_to_camera = float(-relative_pos[2])
-                    dist_flag = distance_to_camera * dist_sort_sign
+            pass_type = alpha_method
 
-                sort_key = (render_queue, group_order, wobject.render_order, dist_flag)
-                wobject_wrappers.append(WobjectWrapper(wobject, sort_key, pass_type))
+            # Depth sort flag. Use the camera's view matrix (projection
+            # doesn't affect ordering, allowing projection=False).
+            # Camera looks down -z.
+            if alpha_method == "weighted":
+                dist_flag = 0
+            elif view_matrix is None:
+                dist_flag = -1
+            else:
+                relative_pos = la.vec_transform(
+                    wobject.world.position, view_matrix, projection=False
+                )
+                distance_to_camera = float(-relative_pos[2])
+                dist_flag = distance_to_camera * dist_sort_sign
+
+            sort_key = (render_queue, group_order, wobject.render_order, dist_flag)
+            wobject_wrappers.append(WobjectWrapper(wobject, sort_key, pass_type))
 
     def sort(self):
         """Sort the world objects."""
