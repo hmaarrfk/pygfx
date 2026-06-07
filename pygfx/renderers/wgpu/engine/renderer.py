@@ -59,6 +59,7 @@ class FlatScene:
     def __init__(self, scene, view_matrix=None, object_count=0):
         self._view_matrix = view_matrix
         self._wobject_wrappers = []  # WobjectWrapper's
+        self._sort_arrays = None  # (render_queue, group_order, render_order, dist)
         self.lights = {
             "point_lights": [],
             "directional_lights": [],
@@ -167,54 +168,89 @@ class FlatScene:
             if wobject._effective_visible:
                 renderables_iter.append(wobject)
 
-        for wobject in renderables_iter:
-            # ``group_order`` was previously propagated by the recursive
-            # walk; now we read it via the cached weakref to the closest
-            # Group ancestor (kept in sync on add/remove).
-            group_ref = wobject._closest_group_ancestor_ref
-            group_order = 0
-            if group_ref is not None:
-                group_ob = group_ref()
-                if group_ob is not None:
-                    group_order = group_ob.render_order
+        if view_matrix is None:
+            # No depth sort to do: ``dist_flag`` is a constant (0 for weighted
+            # blending, else -1), so the per-object Python path is lightest —
+            # vectorizing buys nothing without a real distance to compute.
+            for wobject in renderables_iter:
+                material = wobject._material
+                if material is None:
+                    continue
+                group_ref = wobject._closest_group_ancestor_ref
+                group_ob = group_ref() if group_ref is not None else None
+                group_order = group_ob.render_order if group_ob is not None else 0
+                dist_flag = 0 if material.alpha_method == "weighted" else -1
+                sort_key = (material.render_queue, group_order,
+                            wobject.render_order, dist_flag)
+                wobject_wrappers.append(
+                    WobjectWrapper(wobject, sort_key, material.alpha_method)
+                )
+            self._sort_arrays = None  # -> sort() uses the tuple path
+            return
 
+        # Depth sort with a moving camera is the hot path: the per-object
+        # distance-to-camera (``vec_transform``) and the final sort are done
+        # in bulk with NumPy rather than once per object. Gather the sort-key
+        # components into Python lists (cheap appends), transform all
+        # positions in a single matmul, and let ``sort()`` do one
+        # ``np.lexsort``. Bit-identical to the old per-object path (lexsort is
+        # stable, so equal keys keep scene-graph order).
+        group_order_l = []
+        render_order_l = []
+        sign_l = []
+        weighted_l = []
+        render_queue_l = []
+        positions_l = []
+        for wobject in renderables_iter:
             material = wobject._material
-            # ``renderable`` only contains objects with a material, but
-            # the flag is updated lazily via setters, so be defensive.
             if material is None:
                 continue
-
+            group_ref = wobject._closest_group_ancestor_ref
+            group_ob = group_ref() if group_ref is not None else None
             render_queue = material.render_queue
-            alpha_method = material.alpha_method
+            render_queue_l.append(render_queue)
+            group_order_l.append(group_ob.render_order if group_ob is not None else 0)
+            render_order_l.append(wobject.render_order)
+            # Back-to-front by default; front-to-back for opaque queues.
+            sign_l.append(1.0 if 1500 < render_queue <= 2500 else -1.0)
+            weighted_l.append(material.alpha_method == "weighted")
+            positions_l.append(wobject.world.position)
+            wobject_wrappers.append(
+                WobjectWrapper(wobject, None, material.alpha_method)
+            )
 
-            # By default sort back-to-front, for correct blending.
-            dist_sort_sign = -1
-            # But for opaque queues, render front-to-back to avoid overdraw.
-            if 1500 < render_queue <= 2500:
-                dist_sort_sign = 1
+        if not positions_l:
+            self._sort_arrays = None
+            return
+        relative = la.vec_transform(
+            np.asarray(positions_l, np.float64), view_matrix, projection=False
+        )
+        dist_a = -relative[:, 2] * np.array(sign_l, np.float64)
+        # ``weighted`` blending ignores depth (dist_flag 0).
+        if any(weighted_l):
+            dist_a[np.array(weighted_l, bool)] = 0.0
 
-            pass_type = alpha_method
-
-            # Depth sort flag. Use the camera's view matrix (projection
-            # doesn't affect ordering, allowing projection=False).
-            # Camera looks down -z.
-            if alpha_method == "weighted":
-                dist_flag = 0
-            elif view_matrix is None:
-                dist_flag = -1
-            else:
-                relative_pos = la.vec_transform(
-                    wobject.world.position, view_matrix, projection=False
-                )
-                distance_to_camera = float(-relative_pos[2])
-                dist_flag = distance_to_camera * dist_sort_sign
-
-            sort_key = (render_queue, group_order, wobject.render_order, dist_flag)
-            wobject_wrappers.append(WobjectWrapper(wobject, sort_key, pass_type))
+        # Stored for ``sort()``; parallel to ``self._wobject_wrappers``.
+        self._sort_arrays = (
+            np.array(render_queue_l, np.int64),
+            np.array(group_order_l, np.float64),
+            np.array(render_order_l, np.float64),
+            dist_a,
+        )
 
     def sort(self):
-        """Sort the world objects."""
-        self._wobject_wrappers.sort(key=lambda ob: ob.sort_key)
+        """Sort the world objects (stable depth sort)."""
+        arrays = self._sort_arrays
+        if arrays is None:
+            # No-camera path: wrappers carry tuple sort keys.
+            self._wobject_wrappers.sort(key=lambda ob: ob.sort_key)
+            return
+        render_queue_a, group_order_a, render_order_a, dist_a = arrays
+        # lexsort: last key is primary -> (render_queue, group_order,
+        # render_order, dist), ascending, stable.
+        order = np.lexsort((dist_a, render_order_a, group_order_a, render_queue_a))
+        wrappers = self._wobject_wrappers
+        self._wobject_wrappers = [wrappers[i] for i in order]
 
     def collect_pipelines_container_groups(self, renderstate):
         """Select and resolve the pipeline, compiling shaders, building pipelines and composing binding as needed."""
