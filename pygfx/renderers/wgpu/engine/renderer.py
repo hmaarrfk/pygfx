@@ -55,6 +55,124 @@ class WobjectWrapper:
         self.render_containers = None
 
 
+class _RenderableCache:
+    """Camera-independent renderable data for one scene, cached across frames.
+
+    Building this is the expensive part of the render loop (walking the index,
+    reading each material's render_queue / alpha_method, allocating wrappers).
+    None of it depends on the camera, so it is kept on the scene and reused
+    while the scene's ``_subtree_index.version`` is unchanged (bumped by the
+    scene-graph / material mutations that affect it). Only the depth (camera
+    distance) is recomputed per frame; object *positions* are refreshed
+    incrementally via ``transform.last_modified`` so that moving objects don't
+    force a full rebuild.
+    """
+
+    __slots__ = (
+        "all_renderable_row",
+        "all_stamps",
+        "all_wobjects",
+        "dist_no_camera",
+        "group_order",
+        "has_weighted",
+        "positions",
+        "render_order",
+        "render_queue",
+        "sign",
+        "version",
+        "weighted",
+        "wobjects",
+        "wrappers",
+    )
+
+    @classmethod
+    def build(cls, scene, scene_visible, index):
+        self = cls()
+        renderables = []
+        if scene_visible and scene._renderable_in_index:
+            renderables.append(scene)
+        for wobject in index.renderable:
+            if wobject._effective_visible:
+                renderables.append(wobject)
+
+        wobjects, wrappers = [], []
+        rq_l, go_l, ro_l, sign_l, w_l, pos_l = [], [], [], [], [], []
+        for wobject in renderables:
+            material = wobject._material
+            if material is None:  # cleared concurrently; skip
+                continue
+            group_ref = wobject._closest_group_ancestor_ref
+            group_ob = group_ref() if group_ref is not None else None
+            render_queue = material.render_queue
+            rq_l.append(render_queue)
+            go_l.append(group_ob.render_order if group_ob is not None else 0)
+            ro_l.append(wobject.render_order)
+            sign_l.append(1.0 if 1500 < render_queue <= 2500 else -1.0)
+            w_l.append(material.alpha_method == "weighted")
+            pos_l.append(wobject.world.position)
+            wobjects.append(wobject)
+            wrappers.append(WobjectWrapper(wobject, None, material.alpha_method))
+
+        self.wobjects = wobjects
+        self.wrappers = wrappers
+        self.render_queue = np.array(rq_l, np.int64)
+        self.group_order = np.array(go_l, np.float64)
+        self.render_order = np.array(ro_l, np.float64)
+        self.sign = np.array(sign_l, np.float64)
+        self.weighted = np.array(w_l, bool)
+        self.has_weighted = bool(self.weighted.any()) if w_l else False
+        self.positions = (
+            np.asarray(pos_l, np.float64) if pos_l else np.empty((0, 3), np.float64)
+        )
+        # Depth flag when there is no camera: -1 everywhere, 0 for weighted.
+        dist = np.full(len(wobjects), -1.0)
+        if self.has_weighted:
+            dist[self.weighted] = 0.0
+        self.dist_no_camera = dist
+
+        # All visible objects (not just renderables) need a renderer-id and a
+        # per-frame transform refresh. Cache that list too, plus for each entry
+        # the row into ``positions`` if it is a renderable (else -1), so the
+        # per-frame pass updates transforms and renderable positions in one
+        # sweep. ``all_stamps`` starts at -1 so the first frame after a (re)build
+        # runs ``_update_object`` for everything (syncing uniforms).
+        row_of = {w: r for r, w in enumerate(wobjects)}
+        all_raw = [scene] if scene_visible else []
+        all_raw += [w for w in index.all_objects if w._effective_visible]
+        self.all_renderable_row = np.array(
+            [row_of.get(w, -1) for w in all_raw], np.int64
+        )
+        # ``_self()`` derefs a possible weakproxy (e.g. FastPlotLib), matching
+        # the historical per-object loop; it is identity for normal objects.
+        self.all_wobjects = [w._self() for w in all_raw]
+        self.all_stamps = np.full(len(all_raw), -1, np.int64)
+        return self
+
+    def update_objects(self, object_count, need_pos):
+        """Per-frame sweep over every visible object: assign renderer-ids to
+        new objects and run ``_update_object`` only for those whose transform
+        changed since last frame, refreshing cached renderable positions in the
+        same pass. Returns the new ``object_count``."""
+        stamps = self.all_stamps
+        rows = self.all_renderable_row
+        positions = self.positions
+        allw = self.all_wobjects
+        for i in range(len(allw)):
+            wobject = allw[i]
+            if wobject._renderer_id == 0:
+                object_count += 1
+                wobject._assign_renderer_id(object_count)
+            lm = wobject.world.last_modified
+            if lm != stamps[i]:
+                wobject._update_object()
+                stamps[i] = lm
+                if need_pos:
+                    r = rows[i]
+                    if r >= 0:
+                        positions[r] = wobject.world.position
+        return object_count
+
+
 class FlatScene:
     def __init__(self, scene, view_matrix=None, object_count=0):
         self._view_matrix = view_matrix
@@ -86,7 +204,6 @@ class FlatScene:
 
         # Put some attributes as vars in this namespace for faster access
         view_matrix = self._view_matrix
-        wobject_wrappers = self._wobject_wrappers
         # Restore DFS pre-order if a non-tail mutation left the index dirty
         # (cheap no-op in steady-state render loops).
         scene._ensure_subtree_index_order()
@@ -136,20 +253,24 @@ class FlatScene:
             ambient_color[1] += g * light.intensity
             ambient_color[2] += b * light.intensity
 
-        # Per-object updates: assign renderer ids and refresh transforms
-        # for every visible object, including non-renderable ones (Groups,
-        # cameras nested in the scene, helpers, etc.) — matching the
-        # prior traversal-based behaviour.
-        if scene_visible:
-            scene_obj = scene._self()
-            self.object_count += scene_obj._assign_renderer_id(self.object_count + 1)
-            scene_obj._update_object()
-        for wobject in index.all_objects:
-            if not wobject._effective_visible:
-                continue
-            wobject = wobject._self()
-            self.object_count += wobject._assign_renderer_id(self.object_count + 1)
-            wobject._update_object()
+        # Renderable objects: the camera-independent part (which objects,
+        # their wrappers and sort-key components) is cached on the scene and
+        # reused across frames while the scene's index version is unchanged.
+        # Only the depth sort key (camera distance) is computed per frame.
+        cache = getattr(scene, "_renderable_cache", None)
+        version = index.version
+        if cache is None or cache.version != version:
+            cache = _RenderableCache.build(scene, scene_visible, index)
+            cache.version = version
+            scene._renderable_cache = cache
+
+        need_pos = view_matrix is not None
+
+        # Per-object pass over every visible object (incl. groups/cameras):
+        # assign renderer-ids to new objects and run ``_update_object`` only
+        # for those whose transform changed, refreshing cached renderable
+        # positions in the same sweep. Replaces the old full per-frame loop.
+        self.object_count = cache.update_objects(self.object_count, need_pos)
 
         # Shadow casters (objects with cast_shadow and a geometry).
         shadow_objects = self.shadow_objects
@@ -159,91 +280,30 @@ class FlatScene:
             if wobject._effective_visible:
                 shadow_objects.append(wobject)
 
-        # Renderable objects: build wrappers + sort keys. Iterate scene
-        # itself first (if applicable), then descendants from the index.
-        renderables_iter: "list" = []
-        if scene_visible and scene._renderable_in_index:
-            renderables_iter.append(scene)
-        for wobject in index.renderable:
-            if wobject._effective_visible:
-                renderables_iter.append(wobject)
-
-        if view_matrix is None:
-            # No depth sort to do: ``dist_flag`` is a constant (0 for weighted
-            # blending, else -1), so the per-object Python path is lightest —
-            # vectorizing buys nothing without a real distance to compute.
-            for wobject in renderables_iter:
-                material = wobject._material
-                if material is None:
-                    continue
-                group_ref = wobject._closest_group_ancestor_ref
-                group_ob = group_ref() if group_ref is not None else None
-                group_order = group_ob.render_order if group_ob is not None else 0
-                dist_flag = 0 if material.alpha_method == "weighted" else -1
-                sort_key = (material.render_queue, group_order,
-                            wobject.render_order, dist_flag)
-                wobject_wrappers.append(
-                    WobjectWrapper(wobject, sort_key, material.alpha_method)
-                )
-            self._sort_arrays = None  # -> sort() uses the tuple path
-            return
-
-        # Depth sort with a moving camera is the hot path: the per-object
-        # distance-to-camera (``vec_transform``) and the final sort are done
-        # in bulk with NumPy rather than once per object. Gather the sort-key
-        # components into Python lists (cheap appends), transform all
-        # positions in a single matmul, and let ``sort()`` do one
-        # ``np.lexsort``. Bit-identical to the old per-object path (lexsort is
-        # stable, so equal keys keep scene-graph order).
-        group_order_l = []
-        render_order_l = []
-        sign_l = []
-        weighted_l = []
-        render_queue_l = []
-        positions_l = []
-        for wobject in renderables_iter:
-            material = wobject._material
-            if material is None:
-                continue
-            group_ref = wobject._closest_group_ancestor_ref
-            group_ob = group_ref() if group_ref is not None else None
-            render_queue = material.render_queue
-            render_queue_l.append(render_queue)
-            group_order_l.append(group_ob.render_order if group_ob is not None else 0)
-            render_order_l.append(wobject.render_order)
-            # Back-to-front by default; front-to-back for opaque queues.
-            sign_l.append(1.0 if 1500 < render_queue <= 2500 else -1.0)
-            weighted_l.append(material.alpha_method == "weighted")
-            positions_l.append(wobject.world.position)
-            wobject_wrappers.append(
-                WobjectWrapper(wobject, None, material.alpha_method)
-            )
-
-        if not positions_l:
+        self._wobject_wrappers = cache.wrappers
+        if not cache.wobjects:
             self._sort_arrays = None
             return
-        relative = la.vec_transform(
-            np.asarray(positions_l, np.float64), view_matrix, projection=False
-        )
-        dist_a = -relative[:, 2] * np.array(sign_l, np.float64)
-        # ``weighted`` blending ignores depth (dist_flag 0).
-        if any(weighted_l):
-            dist_a[np.array(weighted_l, bool)] = 0.0
 
-        # Stored for ``sort()``; parallel to ``self._wobject_wrappers``.
+        if not need_pos:
+            dist_a = cache.dist_no_camera
+        else:
+            relative = la.vec_transform(cache.positions, view_matrix, projection=False)
+            dist_a = -relative[:, 2] * cache.sign  # fresh array
+            if cache.has_weighted:
+                dist_a[cache.weighted] = 0.0
+
         self._sort_arrays = (
-            np.array(render_queue_l, np.int64),
-            np.array(group_order_l, np.float64),
-            np.array(render_order_l, np.float64),
+            cache.render_queue,
+            cache.group_order,
+            cache.render_order,
             dist_a,
         )
 
     def sort(self):
-        """Sort the world objects (stable depth sort)."""
+        """Sort the world objects (stable depth sort via ``np.lexsort``)."""
         arrays = self._sort_arrays
         if arrays is None:
-            # No-camera path: wrappers carry tuple sort keys.
-            self._wobject_wrappers.sort(key=lambda ob: ob.sort_key)
             return
         render_queue_a, group_order_a, render_order_a, dist_a = arrays
         # lexsort: last key is primary -> (render_queue, group_order,

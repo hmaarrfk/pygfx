@@ -119,6 +119,7 @@ class _SubtreeIndex:
         "lights_spot",
         "renderable",
         "shadow_casters",
+        "version",
     )
 
     def __init__(self):
@@ -132,6 +133,10 @@ class _SubtreeIndex:
         # Set when a non-DFS-tail insertion leaves the lists out of
         # scene-graph order; cleared by a lazy reorder at render time.
         self._dfs_dirty = False
+        # Monotonic counter bumped whenever this subtree's render-relevant
+        # state changes; the renderer's per-scene cache compares it to know
+        # when to rebuild. Scoped to this object's subtree (no global state).
+        self.version = 0
 
     def add_object(self, obj: "WorldObject") -> None:
         """Insert ``obj`` into the relevant categorized lists."""
@@ -398,6 +403,21 @@ class WorldObject(EventTarget, Trackable):
             parent_ref = node._parent
             node = parent_ref() if parent_ref is not None else None
 
+    def _bump_render_version(self) -> None:
+        """Invalidate cached render structures for this object and every
+        ancestor (any of which a renderer may use as its scene root).
+
+        The version lives on each object's ``_subtree_index``, so this is
+        scoped to the affected subtree — there is no global state. Called from
+        the mutations that change which objects are renderable / lights /
+        shadow casters or their sort-key components. ``O(depth)``; mutations
+        are rare relative to render frames.
+        """
+        for node in self._iter_self_and_ancestors():
+            index = node._subtree_index
+            if index is not None:
+                index.version += 1
+
     def _refresh_caster_status(self) -> None:
         """Recompute self's shadow-caster status and propagate to every
         ancestor's ``shadow_casters`` list."""
@@ -516,6 +536,7 @@ class WorldObject(EventTarget, Trackable):
         self._cascade_topology_change(
             parent._effective_visible, parent._group_ref_for_my_children()
         )
+        self._bump_render_version()
 
     def _detach_subtree_from(self, parent: "WorldObject") -> None:
         """Apply the index/visibility/group bookkeeping for removing
@@ -532,6 +553,7 @@ class WorldObject(EventTarget, Trackable):
 
         # Cascade visibility + group ancestor as if self is now a root.
         self._cascade_topology_change(True, None)
+        self._bump_render_version()
 
     def _ensure_subtree_index_order(self) -> None:
         """Rebuild this object's index lists in scene-graph (DFS pre-order)
@@ -624,6 +646,7 @@ class WorldObject(EventTarget, Trackable):
     def visible(self, visible: bool) -> None:
         self._store.visible = bool(visible)
         self._refresh_visibility_subtree()
+        self._bump_render_version()
 
     @property
     def render_order(self) -> float:
@@ -651,6 +674,7 @@ class WorldObject(EventTarget, Trackable):
     @render_order.setter
     def render_order(self, value: float) -> None:
         self._store.render_order = float(value)
+        self._bump_render_version()
 
     @property
     def render_mask(self):
@@ -676,6 +700,7 @@ class WorldObject(EventTarget, Trackable):
         self._store.geometry = geometry
         # Shadow-caster eligibility depends on geometry presence.
         self._refresh_caster_status()
+        self._bump_render_version()
 
     @property
     def material(self) -> Material | None:
@@ -691,9 +716,18 @@ class WorldObject(EventTarget, Trackable):
             raise TypeError(
                 f"WorldObject.geometry must be a Geometry object or None, not {material!r}"
             )
+        # Track which objects use a material, so an in-place change to the
+        # material's render_queue / alpha_method can invalidate their scenes'
+        # render caches (the material can't reach the scene otherwise).
+        old = getattr(self, "_material", None)
+        if old is not None:
+            old._unregister_user(self)
         self._material = material
+        if material is not None:
+            material._register_user(self)
         # Renderable eligibility depends on having a material.
         self._refresh_renderable_status()
+        self._bump_render_version()
 
     @property
     def cast_shadow(self) -> bool:
@@ -705,6 +739,7 @@ class WorldObject(EventTarget, Trackable):
     def cast_shadow(self, value: bool) -> None:
         self._cast_shadow = bool(value)
         self._refresh_caster_status()
+        self._bump_render_version()
 
     @property
     def receive_shadow(self) -> bool:
