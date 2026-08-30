@@ -163,6 +163,172 @@ def test_adjust_children_order():
         assert actual is expected
 
 
+def _ref_dfs(root):
+    """Reference depth-first pre-order of root's descendants (excludes root)."""
+    out = []
+
+    def walk(o):
+        for c in o._children:
+            out.append(c)
+            walk(c)
+
+    walk(root)
+    return out
+
+
+def _index_order(root):
+    root._ensure_subtree_index_order()
+    return list(root._subtree_index.all_objects)
+
+
+def test_subtree_index_dfs_order():
+    # The incremental scene-graph index must present descendants in the same
+    # depth-first pre-order the old full-walk produced, because that order
+    # drives renderer-id assignment and the stable tiebreak for equal sort
+    # keys. See pygfx issue #1298.
+
+    # Adding to a group that already has a later sibling (not the DFS tail).
+    root = WorldObject()
+    g1, g2 = WorldObject(), WorldObject()
+    root.add(g1, g2)
+    x = WorldObject()
+    g1.add(x)
+    assert _index_order(root) == _ref_dfs(root)
+    assert _index_order(root) == [g1, x, g2]
+
+    # before= insertion.
+    root = WorldObject()
+    a, b, c = WorldObject(), WorldObject(), WorldObject()
+    root.add(a, b)
+    root.add(c, before=a)
+    assert _index_order(root) == _ref_dfs(root) == [c, a, b]
+
+    # Reparenting a subtree to an earlier sibling.
+    root = WorldObject()
+    g1, g2 = WorldObject(), WorldObject()
+    root.add(g1, g2)
+    leaf = WorldObject()
+    g2.add(leaf)
+    g1.add(leaf)
+    assert _index_order(root) == _ref_dfs(root) == [g1, leaf, g2]
+
+
+def test_subtree_index_dfs_order_hard_cases():
+    # Move a *populated* subtree to an earlier position: its whole block must
+    # relocate in DFS order, not just its root.
+    root = WorldObject()
+    a, b = WorldObject(), WorldObject()
+    root.add(a, b)
+    sub = WorldObject()
+    s1, s2 = WorldObject(), WorldObject()
+    sub.add(s1, s2)
+    b.add(sub)  # sub currently under b (the tail) -> clean
+    assert _index_order(root) == _ref_dfs(root)
+    a.add(sub)  # move populated sub under a (earlier sibling) -> dirty
+    assert _index_order(root) == _ref_dfs(root) == [a, sub, s1, s2, b]
+
+    # Several non-tail mutations before a single render coalesce into one
+    # correct reorder.
+    root = WorldObject()
+    groups = [WorldObject() for _ in range(4)]
+    root.add(*groups)
+    leaves = [WorldObject() for _ in range(4)]
+    for g, leaf in zip(groups, leaves, strict=True):
+        g.add(leaf)  # each adds to a non-tail group (except the last)
+    assert _index_order(root) == _ref_dfs(root)
+
+    # The element whose insertion dirtied the index is removed again before
+    # the render: the reorder must still produce valid DFS order.
+    root = WorldObject()
+    g1, g2 = WorldObject(), WorldObject()
+    root.add(g1, g2)
+    tmp = WorldObject()
+    g1.add(tmp)  # dirties (g1 is not the tail)
+    g1.remove(tmp)  # remove the offending node before any render
+    assert _index_order(root) == _ref_dfs(root) == [g1, g2]
+
+    # clear() then rebuild.
+    root = WorldObject()
+    g1, g2 = WorldObject(), WorldObject()
+    root.add(g1, g2)
+    g1.add(WorldObject())
+    root.clear()
+    assert _index_order(root) == _ref_dfs(root) == []
+    c1, c2 = WorldObject(), WorldObject()
+    root.add(c1)
+    c1.add(c2)
+    assert _index_order(root) == _ref_dfs(root) == [c1, c2]
+
+
+def test_subtree_index_renderable_and_light_order_follow_dfs():
+    # renderable order is the stable tiebreak for equal sort keys, and light
+    # order maps to uniform slots; both must follow DFS pre-order after a
+    # non-tail insertion.
+    import numpy as np
+
+    def _point(name):
+        p = gfx.Points(
+            gfx.Geometry(positions=np.zeros((1, 3), "float32")),
+            gfx.PointsMaterial(),
+        )
+        p.name = name
+        return p
+
+    scene = gfx.Scene()
+    g1, g2 = gfx.Group(), gfx.Group()
+    scene.add(g1, g2)
+    p_late = _point("late")
+    g2.add(p_late)
+    p_early = _point("early")
+    g1.add(p_early)  # non-tail insert -> dirty
+    scene._ensure_subtree_index_order()
+
+    ref = _ref_dfs(scene)
+    renderable = list(scene._subtree_index.renderable)
+    # renderable is the DFS order filtered to objects-with-material.
+    assert renderable == [o for o in ref if o in scene._subtree_index.renderable]
+    assert [o.name for o in renderable] == ["early", "late"]
+
+    # Lights likewise follow DFS order.
+    scene = gfx.Scene()
+    g1, g2 = gfx.Group(), gfx.Group()
+    scene.add(g1, g2)
+    l_late = gfx.PointLight()
+    l_late.name = "late"
+    g2.add(l_late)
+    l_early = gfx.PointLight()
+    l_early.name = "early"
+    g1.add(l_early)  # non-tail -> dirty
+    scene._ensure_subtree_index_order()
+    assert [o.name for o in scene._subtree_index.lights_point] == ["early", "late"]
+
+
+def test_subtree_index_tail_append_stays_clean():
+    # The common build patterns graft at the depth-first tail, so they must
+    # NOT dirty the index (this is what keeps render a no-op walk-free path).
+    root = WorldObject()
+    for _ in range(10):
+        root.add(WorldObject())  # flat append
+    assert root._subtree_index._dfs_dirty is False
+
+    root = WorldObject()
+    for _ in range(4):
+        g = WorldObject()
+        root.add(g)
+        for _ in range(3):
+            g.add(WorldObject())  # fill each group before moving on
+    assert root._subtree_index._dfs_dirty is False
+    assert _index_order(root) == _ref_dfs(root)
+
+    root = WorldObject()  # deep rightmost spine
+    parent = root
+    for _ in range(8):
+        g = WorldObject()
+        parent.add(g)
+        parent = g
+    assert root._subtree_index._dfs_dirty is False
+
+
 def test_iter():
     class Foo(WorldObject):
         pass
