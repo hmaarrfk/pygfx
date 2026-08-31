@@ -1,9 +1,16 @@
 # TEMPORARY diagnostic workflow -- to be deleted before this PR is merged.
 #
-# Goal: find out what makes the five flaky `validate_*` screenshot comparisons
-# render differently on some ubuntu-latest runners and not others, given that
-# the OS image, the mesa build, the python version and the pip set are all
-# byte-identical between a passing and a failing job.
+# Round 2. Round 1 showed the render variant tracks the CPU *vendor*
+# (AMD EPYC -> matches references, Intel Xeon 8573C -> the failing variant)
+# and that LP_NUM_THREADS / LP_NATIVE_VECTOR_WIDTH / GALLIVM_PERF sampler
+# hacks make no difference at all. This round:
+#   * samples more runners, to get more than one Intel data point
+#   * checks whether the divergence survives GALLIVM_PERF=nopt, which turns
+#     off the LLVM optimisation passes -- if it does, the difference is in
+#     instruction *semantics*, not in what LLVM chose to emit
+#   * measures rcpps/rsqrtps directly. These are the approximate-reciprocal
+#     instructions; the ISA only guarantees ~12 bits, and the exact result is
+#     implementation-defined, so Intel and AMD legitimately differ.
 name: probe
 
 on:
@@ -20,7 +27,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        n: [1, 2, 3, 4, 5, 6, 7, 8]
+        n: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     steps:
     - uses: actions/checkout@v4
     - name: Set up Python
@@ -37,26 +44,33 @@ jobs:
         pip install -e .[examples]
     - name: CPU identity
       run: |
-        echo "=== model ==="
-        grep -m1 "^model name" /proc/cpuinfo
-        grep -m1 "^vendor_id" /proc/cpuinfo
-        grep -m1 "^cpu family" /proc/cpuinfo
-        grep -m1 "^model\b" /proc/cpuinfo
-        grep -m1 "^stepping" /proc/cpuinfo
-        echo "nproc=$(nproc)"
-        echo "=== interesting flags ==="
-        for f in avx avx2 avx512f avx512vl fma f16c bmi2 sse4_2; do
-          grep -qw "$f" /proc/cpuinfo && echo "  $f: yes" || echo "  $f: NO"
-        done
+        echo "CPUID $(grep -m1 '^model name' /proc/cpuinfo | cut -d: -f2- | xargs) | $(grep -m1 '^vendor_id' /proc/cpuinfo | cut -d: -f2- | xargs) | nproc=$(nproc)"
+    - name: Approximate-reciprocal instruction results
+      run: |
+        cat > rcp.c <<'EOF'
+        /* rcpps/rsqrtps are ~12-bit approximations; the exact bits are
+           implementation defined, so this is expected to differ per vendor. */
+        #include <stdio.h>
+        #include <string.h>
+        #include <immintrin.h>
+        static void show(const char *tag, __m128 v) {
+            float f[4]; unsigned u[4];
+            _mm_storeu_ps(f, v); memcpy(u, f, sizeof u);
+            printf("RCPTEST %-8s %08x %08x %08x %08x\n", tag, u[0], u[1], u[2], u[3]);
+        }
+        int main(void) {
+            __m128 x = _mm_setr_ps(3.0f, 7.0f, 0.1f, 1234.5f);
+            show("rcpps", _mm_rcp_ps(x));
+            show("rsqrtps", _mm_rsqrt_ps(x));
+            return 0;
+        }
+        EOF
+        gcc -O2 -msse2 -o rcp rcp.c && ./rcp
     - name: Render hashes
       env:
         PYGFX_EXPECT_LAVAPIPE: "true"
       run: |
-        for cfg in "default" "LP_NUM_THREADS=1" "LP_NATIVE_VECTOR_WIDTH=128" "GALLIVM_PERF=no_filter_hacks,no_quad_lod"; do
-          echo "############ config: $cfg"
-          if [ "$cfg" = "default" ]; then
-            python probe_render.py
-          else
-            env "$cfg" python probe_render.py
-          fi
-        done
+        echo "############ config: default"
+        python probe_render.py
+        echo "############ config: GALLIVM_PERF=nopt"
+        GALLIVM_PERF=nopt python probe_render.py
