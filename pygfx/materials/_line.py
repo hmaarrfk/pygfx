@@ -27,8 +27,10 @@ class LineMaterial(Material):
         The offset into the dash phase. Default 0.0.
     dash_scaling : str | DashScaling
         How the dash pattern behaves when the view scale changes ('continuous', 'quantized'). Default 'continuous'.
-    dash_max_scale : float
-        For 'quantized' scaling, the largest the dashes may grow, relative to the requested size, before they split. Default sqrt(2).
+    dash_scale_step : float
+        For 'quantized' scaling, the factor between successive dash sizes. 1 reproduces continuous scaling, 2 makes each dash split in two. Default 2.
+    dash_max_scale : float | None
+        For 'quantized' scaling, the largest the dashes may grow, relative to the requested size, before they split. Default None, i.e. centred on the requested size.
     loop : bool
         Whether the line's end should be connected. Default False.
     aa : bool
@@ -57,7 +59,8 @@ class LineMaterial(Material):
         dash_pattern=(),
         dash_offset=0,
         dash_scaling="continuous",
-        dash_max_scale=2**0.5,
+        dash_scale_step=2.0,
+        dash_max_scale=None,
         loop=False,
         aa=False,
         **kwargs,
@@ -73,6 +76,7 @@ class LineMaterial(Material):
         self.dash_pattern = dash_pattern
         self.dash_offset = dash_offset
         self.dash_scaling = dash_scaling
+        self.dash_scale_step = dash_scale_step
         self.dash_max_scale = dash_max_scale
         self.loop = loop
         self.aa = aa
@@ -294,43 +298,74 @@ class LineMaterial(Material):
         self._store.dash_scaling = value
 
     @property
+    def dash_scale_step(self):
+        """The factor between successive dash sizes, when `dash_scaling` is
+        'quantized'.
+
+        As the view scale changes, the dash size does not follow it smoothly;
+        it is held, and then jumps by this factor. The parameter is a
+        continuous dial between the two behaviours:
+
+        * 1.0 -- the size follows the view exactly, i.e. this reproduces
+          `dash_scaling='continuous'`. The dashes keep the size asked for, and
+          slide along the line as you zoom.
+        * 2.0 (the default) -- the size snaps to powers of two. Nothing slides:
+          each step splits every dash into two.
+        * 3.0 -- as above, but each step splits every dash into three, over a
+          three-fold range of sizes.
+
+        Only a whole number gives dashes that truly never move, because the
+        dash starts of one level are a subset of the next level's only when the
+        levels differ by a whole factor. In between, the dashes still jump
+        rather than slide, but they land somewhere new when they do; the
+        smaller the step, the smaller and more frequent those jumps, until at
+        1.0 they merge into the continuous slide.
+
+        The size varies over a range of exactly this factor, so a larger step
+        buys stiller dashes at the cost of a less accurate size.
+        """
+        return self._store.dash_scale_step
+
+    @dash_scale_step.setter
+    def dash_scale_step(self, value):
+        value = float(value)
+        if value < 1.0:
+            raise ValueError(
+                f"LineMaterial.dash_scale_step must be at least 1, not {value!r}"
+            )
+        self._store.dash_scale_step = value
+
+    @property
     def dash_max_scale(self):
         """How large the dashes may grow before they split, when `dash_scaling`
         is 'quantized'.
 
-        Expressed as a ratio to the size that `dash_pattern` asks for, and
-        clamped to the range 1 to 2.
+        Expressed as a ratio to the size that `dash_pattern` asks for. The
+        dashes range over exactly `dash_scale_step`, from
+        `dash_max_scale / dash_scale_step` up to `dash_max_scale` times the
+        requested size; this property only chooses where that range sits.
+        It is clamped to lie between 1 and `dash_scale_step`.
 
-        The dashes always range over a factor of exactly two, from
-        `dash_max_scale / 2` up to `dash_max_scale` times the requested size.
-        That width is not adjustable: the whole point of the quantization is
-        that a change of level *splits* each dash rather than moving it, which
-        requires successive levels to differ by a whole factor. Two is the
-        smallest such factor, so one octave is as narrow as the band can be.
+        The default, None, centres the range on the requested size, i.e.
+        ``sqrt(dash_scale_step)``, so that the dashes are never off by more
+        than that factor in either direction. Setting it to
+        `dash_scale_step` means the dashes are never finer than requested, and
+        setting it to 1 means they are never coarser.
 
-        What this property chooses is where that octave sits:
-
-        * 2.0 -- the dashes are never finer than requested. They grow to twice
-          the requested size, then split back to it.
-        * sqrt(2) (the default) -- the band straddles the requested size, which
-          keeps the dashes as close to it as possible, never off by more than
-          a factor of sqrt(2) either way.
-        * 1.0 -- the dashes are never coarser than requested. They shrink to
-          half the requested size, then merge back to it.
-
-        Note that the hysteresis on the level snap (see the `dash_scaling`
-        docs) lets the dashes overshoot this band slightly, so that a view
-        parked on a boundary does not flicker between two levels.
+        Note that the hysteresis on the snap (see the `dash_scaling` docs) lets
+        the dashes overshoot the range slightly, so that a view parked on a
+        boundary does not flicker between two levels.
         """
         return self._store.dash_max_scale
 
     @dash_max_scale.setter
     def dash_max_scale(self, value):
-        value = float(value)
-        if not (1.0 <= value <= 2.0):
-            raise ValueError(
-                f"LineMaterial.dash_max_scale must be between 1 and 2, not {value!r}"
-            )
+        if value is not None:
+            value = float(value)
+            if value < 1.0:
+                raise ValueError(
+                    f"LineMaterial.dash_max_scale must be at least 1, not {value!r}"
+                )
         self._store.dash_max_scale = value
 
     @property

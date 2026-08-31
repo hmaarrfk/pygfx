@@ -4,34 +4,36 @@ Dash scaling
 
 How the dash pattern responds to zoom. Scroll to zoom, drag to pan.
 
-All four rows are the same geometry with the same ``dash_pattern``. They do not
-look the same, and that is the point: each has settled on a different dash size
-for this particular view, within the range its settings allow.
+All four rows are the same geometry with the same ``dash_pattern``, and differ
+only in ``dash_scale_step``: the factor by which the dash size is allowed to
+jump as the view scale changes.
 
-The top row is the default, ``dash_scaling="continuous"``: the dashes keep
-exactly the on-screen size asked for, but to do that their number along the
-line has to change continuously, so they slide. A dash drifts in proportion to
-its distance from the start of its line piece, which is why the far end of the
-long line races while the near end barely moves.
+* ``dash_scale_step=1`` (top) is the old behaviour, and is what
+  ``dash_scaling="continuous"`` does. The size follows the view exactly, so the
+  dashes always have the size asked for -- but their number along the line has
+  to change continuously, so they slide. A dash drifts in proportion to its
+  distance from the start of its line piece, which is why the far end of the
+  long line races while the near end barely moves.
 
-The other three are ``dash_scaling="quantized"``, which anchors the pattern to
-the object and lets only its period follow the view, snapped to a power of two.
-Nothing slides: each time the period changes, every dash splits in two (or
-pairs of dashes merge), and no dash ever moves. The dashes therefore have to
-change size between splits, over a range of exactly a factor of two -- that
-width is what makes them split instead of move, and is not adjustable. What
-``dash_max_scale`` chooses is where that factor of two sits relative to the
-size you asked for:
+* ``dash_scale_step=2`` (bottom) snaps the size to powers of two. Nothing
+  slides: each time the level changes, every dash splits in two (or pairs
+  merge), and no dash moves. The cost is that the size is only right to within
+  a factor of two.
 
-* ``dash_max_scale=2`` -- never finer than asked. Dashes grow to twice the
-  requested size, then split back to it.
-* ``dash_max_scale=sqrt(2)`` (the default) -- straddles the requested size, so
-  the dashes are never off by more than sqrt(2) in either direction.
-* ``dash_max_scale=1`` -- never coarser than asked. Dashes shrink to half the
-  requested size, then merge back to it.
+The two rows between are the same mechanism at 1.25 and 1.6, to show that this
+is one continuous dial rather than two modes. Only a whole-number step gives
+dashes that truly never move, because the dash starts of one level are a subset
+of the next level's only when the levels differ by a whole factor; at 1.25 and
+1.6 the dashes still jump rather than slide, but they land somewhere new when
+they do. The smaller the step, the smaller and more frequent the jumps, until
+at 1 they merge into a continuous slide.
 
-Watch the far end of the long line for the sliding, and watch any one dash to
-see it split rather than move.
+A second parameter, ``dash_max_scale``, chooses where the size range sits: at
+``dash_scale_step`` the dashes are never finer than asked, at 1 never coarser,
+and the default (None) centres it.
+
+Watch the far end of the long line for the sliding, and watch any one dash on
+the bottom row to see it split rather than move.
 """
 
 # sphinx_gallery_pygfx_docs = 'screenshot'
@@ -74,20 +76,15 @@ def geometry(y):
     )
 
 
-# dash_scaling, dash_max_scale, colour, label
+# dash_scale_step, colour, label
 VARIANTS = [
-    ("continuous", None, "#f55", "continuous: exact size, but slides"),
-    ("quantized", 2.0, "#5f5", "quantized, dash_max_scale=2: never finer than asked"),
-    (
-        "quantized",
-        2**0.5,
-        "#59f",
-        "quantized, dash_max_scale=sqrt(2): closest to asked",
-    ),
-    ("quantized", 1.0, "#fd5", "quantized, dash_max_scale=1: never coarser than asked"),
+    (1.0, "#f55", "dash_scale_step=1: the old behaviour, exact size but slides"),
+    (1.25, "#5f5", "dash_scale_step=1.25: small, frequent jumps"),
+    (1.6, "#59f", "dash_scale_step=1.6: larger, rarer jumps"),
+    (2.0, "#fd5", "dash_scale_step=2: dashes split in two, and never move"),
 ]
 
-for i, (dash_scaling, dash_max_scale, color, label) in enumerate(VARIANTS):
+for i, (dash_scale_step, color, label) in enumerate(VARIANTS):
     y = 240 - i * 170
     material = gfx.LineMaterial(
         thickness=8,
@@ -96,10 +93,9 @@ for i, (dash_scaling, dash_max_scale, color, label) in enumerate(VARIANTS):
         aa=True,
         dash_pattern=[2, 2],
         thickness_space="screen",
-        dash_scaling=dash_scaling,
+        dash_scaling="quantized",
     )
-    if dash_max_scale is not None:
-        material.dash_max_scale = dash_max_scale
+    material.dash_scale_step = dash_scale_step
     scene.add(gfx.Line(geometry(y), material))
 
     text = gfx.Text(

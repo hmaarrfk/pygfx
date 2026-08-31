@@ -279,7 +279,7 @@ def test_quantized_level_still_follows_a_real_zoom():
     assert levels[0] - levels[-1] == 3
 
 
-def test_dash_max_scale_places_the_octave():
+def test_dash_max_scale_places_the_size_range():
     """`dash_max_scale` chooses where the factor-of-two band sits.
 
     The band is always exactly one octave wide -- that is what makes a level
@@ -327,12 +327,103 @@ def test_dash_max_scale_default_matches_round():
         assert level == expected_level
 
 
-def test_dash_max_scale_is_validated():
+def test_dash_scaling_parameters_are_validated():
     material = gfx.LineMaterial(dash_pattern=[2, 2])
-    assert material.dash_max_scale == 2**0.5
-    for bad in [0.9, 2.1]:
-        with pytest.raises(ValueError):
-            material.dash_max_scale = bad
+    assert material.dash_scale_step == 2.0
+    assert material.dash_max_scale is None  # i.e. centred on the requested size
+    with pytest.raises(ValueError):
+        material.dash_scale_step = 0.9
+    with pytest.raises(ValueError):
+        material.dash_max_scale = 0.9
+
+
+def test_dash_scale_step_one_reproduces_continuous():
+    """The old behaviour is a value of the new parameter, not a separate mode.
+
+    Exact for an orthographic camera. Under perspective the two genuinely
+    differ: continuous measures true screen arc length per node, while
+    quantized measures model arc length scaled by a single global factor.
+    """
+    positions = np.array([[0, 0, 0], [100, 0, 0]], np.float32)
+    thickness = 10.0
+
+    def far_node(dash_scaling, view_width, step=1.0):
+        material = gfx.LineMaterial(
+            thickness=thickness,
+            dash_pattern=[2, 2],
+            thickness_space="screen",
+            dash_scaling=dash_scaling,
+        )
+        if dash_scaling == "quantized":
+            material.dash_scale_step = step
+        line = gfx.Line(gfx.Geometry(positions=positions), material)
+        shader = LineShader(line)
+        shader.bake_function(
+            line, gfx.OrthographicCamera(view_width, view_width), (1000, 1000)
+        )
+        value = shader.line_distance_buffer.data[1]
+        # continuous keeps screen pixels and divides by thickness in the
+        # shader; quantized bakes dash units directly
+        return value / thickness if dash_scaling == "continuous" else value
+
+    for view_width in np.geomspace(400, 40, 40):
+        reference = far_node("continuous", view_width)
+        assert np.isclose(far_node("quantized", view_width, 1.0), reference, rtol=1e-5)
+
+
+def test_dash_scale_step_dials_smoothly_away_from_continuous():
+    """A larger step departs further from the requested size, monotonically."""
+    positions = np.array([[0, 0, 0], [100, 0, 0]], np.float32)
+    thickness, logical = 10.0, 1000
+
+    def worst_deviation(step):
+        material = gfx.LineMaterial(
+            thickness=thickness,
+            dash_pattern=[2, 2],
+            thickness_space="screen",
+            dash_scaling="quantized",
+        )
+        material.dash_scale_step = step
+        line = gfx.Line(gfx.Geometry(positions=positions), material)
+        shader = LineShader(line)
+        worst = 0.0
+        for view_width in np.geomspace(400, 40, 60):
+            shader.bake_function(
+                line, gfx.OrthographicCamera(view_width, view_width), (logical, logical)
+            )
+            ratio = shader._dash_unit / (thickness * view_width / logical)
+            worst = max(worst, abs(ratio - 1))
+        return worst
+
+    deviations = [worst_deviation(step) for step in [1.0, 1.1, 1.5, 2.0]]
+    assert deviations[0] < 1e-6  # step 1 is exactly the requested size
+    assert deviations == sorted(deviations)  # and it grows with the step
+
+
+def test_dash_scale_step_sets_the_width_of_the_size_range():
+    """The dash size ranges over exactly one step, whatever the step is."""
+    positions = np.array([[0, 0, 0], [100, 0, 0]], np.float32)
+    thickness, logical = 10.0, 1000
+    overshoot = 2**DASH_LEVEL_HYSTERESIS
+
+    for step in [1.5, 2.0, 3.0]:
+        material = gfx.LineMaterial(
+            thickness=thickness,
+            dash_pattern=[2, 2],
+            thickness_space="screen",
+            dash_scaling="quantized",
+        )
+        material.dash_scale_step = step
+        line = gfx.Line(gfx.Geometry(positions=positions), material)
+        shader = LineShader(line)
+        ratios = []
+        for view_width in np.geomspace(400, 400 / step**4, 400):
+            shader.bake_function(
+                line, gfx.OrthographicCamera(view_width, view_width), (logical, logical)
+            )
+            ratios.append(shader._dash_unit / (thickness * view_width / logical))
+        observed = max(ratios) / min(ratios)
+        assert step / overshoot < observed <= step * overshoot
 
 
 def test_quantized_rebakes_only_when_the_level_changes():

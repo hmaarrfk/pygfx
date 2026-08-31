@@ -129,6 +129,7 @@ class LineShader(BaseShader):
                 self.needs_bake_function = True
                 self._cumdist_hash = None
                 self._dash_level = None
+                self._dash_unit = None
                 # Like the loop buffer, this buffer is one larger when looping, so
                 # that the node that closes a loop can store the cumulative distance
                 # of the full loop (see _bake_line_distance).
@@ -258,28 +259,31 @@ class LineShader(BaseShader):
             return None
         return float(units_per_pixel)
 
-    def _get_dash_level(self, wobject, camera, logical_size, positions):
-        """The power of two that the quantized dash period is snapped to.
+    def _get_dash_unit(self, wobject, camera, logical_size, positions):
+        """The size of one dash unit, in model units.
 
         The pattern wants one dash unit to cover `material.thickness` logical
-        pixels, which is `thickness * units_per_pixel` model units. Snapping the
-        log2 of that to an integer means that a change of level splits every
-        dash in two rather than moving any of them, because the dash starts of
-        one level are a subset of those of the next finer level.
+        pixels, which is `thickness * units_per_pixel` model units. Snapping
+        that to a power of `material.dash_scale_step` is what makes the dashes
+        hold still: for a whole-number step, the dash starts of one level are a
+        subset of the next level's, so a change of level splits each dash
+        rather than moving it.
 
-        Successive levels differ by a factor of two, so the on-screen dash size
-        always ranges over exactly one octave; that width is what makes the
-        dashes split rather than move, and is not adjustable. Where that octave
-        sits relative to the requested size is, via `material.dash_max_scale`:
-        it enters here as a bias on the level, so that a dash is allowed to grow
-        to `dash_max_scale` times the requested size before it splits.
+        The step is a continuous dial between the two behaviours. At 1 there is
+        no snapping at all and the size follows the view exactly, which is what
+        `dash_scaling='continuous'` does; at 2 each level change splits every
+        dash in two. In between, the dashes jump rather than slide, but they do
+        land somewhere new when they jump.
 
-        The snapping is done with hysteresis, i.e. as a Schmitt trigger: the
-        current level is kept until the ideal level is clearly past the
-        boundary. Without it, a view that sits near a boundary (a slow zoom, or
-        just camera jitter) would flip between two levels from frame to frame,
-        and the dashes would visibly stutter between splitting and merging.
-        The price is that the dashes may overshoot the octave a little; see
+        The size varies over a range of exactly one step. Where that range sits
+        is `material.dash_max_scale`, which enters as a bias on the level.
+
+        The snap has hysteresis, i.e. it is a Schmitt trigger: the current
+        level is kept until the ideal level is clearly past the boundary.
+        Without it, a view that sits near a boundary (a slow zoom, or just
+        camera jitter) would flip between two levels from frame to frame, and
+        the dashes would visibly stutter between splitting and merging. The
+        price is that the dashes may overshoot the range a little; see
         DASH_LEVEL_HYSTERESIS.
         """
         units_per_pixel = self._get_model_units_per_pixel(
@@ -288,22 +292,40 @@ class LineShader(BaseShader):
         material = wobject.material
         thickness = material.thickness
         if units_per_pixel is None or thickness <= 0:
-            return self._dash_level or 0  # keep whatever we had
+            return self._dash_unit or 1.0  # keep whatever we had
 
-        # Where in the octave to snap. The size ratio works out as
-        # 2**(level - ideal), and level = floor(ideal + bias), so the ratio
-        # spans [2**(bias-1), 2**bias]: the bias is the log2 of the largest
-        # scale we allow. A bias of 0.5 recovers round().
-        bias = float(np.log2(material.dash_max_scale))
-        biased_level = float(np.log2(thickness * units_per_pixel)) + bias
+        nominal = thickness * units_per_pixel
+        step = material.dash_scale_step
+        if step <= 1.0:
+            # The limit of the snapping below, and the behaviour of
+            # dash_scaling='continuous': the size follows the view exactly.
+            self._dash_level = None
+            return nominal
+
+        # Where in the step the size range sits. The ratio of the snapped size
+        # to the nominal one is step**(level - ideal), and level is the floor of
+        # (ideal + bias), so the ratio spans [step**(bias-1), step**bias]: the
+        # bias is the log of the largest scale allowed. None means centred.
+        max_scale = material.dash_max_scale
+        if max_scale is None:
+            bias = 0.5
+        else:
+            bias = np.log(min(max(max_scale, 1.0), step)) / np.log(step)
+        biased_level = np.log(nominal) / np.log(step) + bias
 
         if self._dash_level is None:
-            return int(np.floor(biased_level))  # nothing to be hysteretic about yet
-        low = self._dash_level - DASH_LEVEL_HYSTERESIS
-        high = self._dash_level + 1.0 + DASH_LEVEL_HYSTERESIS
-        if low <= biased_level < high:
-            return self._dash_level
-        return int(np.floor(biased_level))
+            level = int(np.floor(biased_level))  # nothing to be hysteretic about
+        elif (
+            self._dash_level - DASH_LEVEL_HYSTERESIS
+            <= biased_level
+            < self._dash_level + 1.0 + DASH_LEVEL_HYSTERESIS
+        ):
+            level = self._dash_level
+        else:
+            level = int(np.floor(biased_level))
+
+        self._dash_level = level
+        return float(step**level)
 
     def _bake_line_distance(self, wobject, camera, logical_size):
         # Prepare
@@ -323,7 +345,7 @@ class LineShader(BaseShader):
         # changes rarely: the whole bake can be skipped while the level holds.
         quantized = self["dash_scaling"] == "quantized"
         if quantized:
-            self._dash_level = self._get_dash_level(
+            self._dash_unit = self._get_dash_unit(
                 wobject, camera, logical_size, positions_array
             )
 
@@ -333,7 +355,7 @@ class LineShader(BaseShader):
             cumdist_hash = (
                 id(positions_buffer),
                 positions_buffer.rev,
-                self._dash_level if quantized else None,
+                self._dash_unit if quantized else None,
             )
             if cumdist_hash == self._cumdist_hash:
                 return
@@ -411,14 +433,14 @@ class LineShader(BaseShader):
                 )
             r_size += 1  # the connector of the last loop can sit just past the range
 
-        # Convert model units to dash units. One dash unit spans 2**level model
-        # units, which is the power of two nearest to the `thickness` logical
-        # pixels that the pattern asks for. Because the level only ever doubles
-        # or halves, the dash starts of one level are a subset of those of the
-        # next finer level, so the dashes split rather than slide.
+        # Convert model units to dash units. One dash unit spans _dash_unit
+        # model units, snapped to a power of `dash_scale_step` near the
+        # `thickness` logical pixels the pattern asks for. Because the snap is
+        # by a whole factor, the dash starts of one level are a subset of those
+        # of the next finer level, so the dashes split rather than slide.
         if quantized:
             self.line_distance_buffer.data[r_offset : r_offset + r_size] /= (
-                2.0**self._dash_level
+                self._dash_unit
             )
 
         # Mark that the data has changed
