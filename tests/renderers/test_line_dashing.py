@@ -133,6 +133,117 @@ def test_cumdist_with_nonfinites_in_other_thickness_spaces():
         assert cumdist[4] > cumdist[3] > 0
 
 
+# ----- quantized dash scaling
+
+
+def bake_quantized(positions, view_width, thickness=10.0, logical_size=(1000, 1000)):
+    """Bake with dash_scaling='quantized' at a given ortho camera width."""
+    line = gfx.Line(
+        gfx.Geometry(positions=positions),
+        gfx.LineMaterial(
+            thickness=thickness,
+            dash_pattern=[2, 2],
+            thickness_space="screen",
+            dash_scaling="quantized",
+        ),
+    )
+    camera = gfx.OrthographicCamera(view_width, view_width)
+    shader = LineShader(line)
+    shader.bake_function(line, camera, logical_size)
+    return shader.line_distance_buffer.data.copy(), shader._dash_level
+
+
+def test_dash_scaling_only_applies_to_screen_space():
+    """In model/world space the pattern is anchored to the object already."""
+    positions = np.array([[0, 0, 0], [10, 0, 0]], np.float32)
+    for thickness_space in ["model", "world"]:
+        line = gfx.Line(
+            gfx.Geometry(positions=positions),
+            gfx.LineMaterial(
+                thickness=1,
+                dash_pattern=[2, 2],
+                thickness_space=thickness_space,
+                dash_scaling="quantized",
+            ),
+        )
+        shader = LineShader(line)
+        assert shader["dash_scaling"] == "continuous"
+        assert shader["cumdist_space"] == thickness_space
+
+
+def test_quantized_period_is_a_power_of_two_of_model_units():
+    """One dash unit spans 2**level model units, whatever the zoom."""
+    positions = np.array([[0, 0, 0], [100, 0, 0]], np.float32)
+    for view_width, expected_level in [(400, 2), (200, 1), (100, 0), (50, -1)]:
+        cumdist, level = bake_quantized(positions, view_width)
+        assert level == expected_level
+        # cumdist is in dash units, so the far node sits at length / 2**level
+        assert np.allclose(cumdist[1], 100.0 / 2.0**level)
+
+
+def test_quantized_dashes_split_rather_than_slide():
+    """Every dash edge of a coarser level survives at the next finer level.
+
+    This is the property that makes the dashes appear to split in two rather
+    than travel along the line when the view scale changes.
+    """
+    positions = np.array([[0, 0, 0], [100, 0, 0]], np.float32)
+    dash_size = 4.0
+
+    def edges(view_width):
+        cumdist, _ = bake_quantized(positions, view_width)
+        # phase is linear in x along this straight line
+        model_per_period = dash_size * 100.0 / cumdist[1]
+        return np.arange(0, 100.0 + 1e-9, model_per_period)
+
+    previous = None
+    for view_width in np.linspace(320, 160, 17):  # a smooth 2x zoom in
+        current = edges(view_width)
+        if previous is not None:
+            # every old edge must still be an edge, to within float error
+            distance = np.abs(previous[:, None] - current[None, :]).min(axis=1)
+            assert distance.max() < 1e-3, f"a dash edge moved by {distance.max()}"
+        previous = current
+
+
+def test_quantized_on_screen_size_stays_near_the_requested_one():
+    """Rounding the log2 keeps the dash unit within sqrt(2) of `thickness`."""
+    positions = np.array([[0, 0, 0], [100, 0, 0]], np.float32)
+    thickness, logical = 10.0, 1000
+    for view_width in np.geomspace(40, 400, 25):
+        _, level = bake_quantized(positions, view_width, thickness=thickness)
+        model_units_per_pixel = view_width / logical
+        on_screen = 2.0**level / model_units_per_pixel
+        assert (
+            thickness / np.sqrt(2) - 1e-6 <= on_screen <= thickness * np.sqrt(2) + 1e-6
+        )
+
+
+def test_quantized_rebakes_only_when_the_level_changes():
+    """The level changes rarely, so most frames can skip the bake entirely."""
+    positions = np.array([[0, 0, 0], [100, 0, 0]], np.float32)
+    line = gfx.Line(
+        gfx.Geometry(positions=positions),
+        gfx.LineMaterial(
+            thickness=10,
+            dash_pattern=[2, 2],
+            thickness_space="screen",
+            dash_scaling="quantized",
+        ),
+    )
+    shader = LineShader(line)
+
+    def bake(view_width):
+        shader.bake_function(
+            line, gfx.OrthographicCamera(view_width, view_width), (1000, 1000)
+        )
+        return shader._cumdist_hash
+
+    first = bake(200)
+    assert bake(190) == first, "a small zoom should not change the level"
+    assert bake(100) != first, "a 2x zoom should change the level"
+
+
 if __name__ == "__main__":
     for name, func in list(globals().items()):
         if name.startswith("test_"):

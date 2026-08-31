@@ -44,6 +44,8 @@ class LineShader(BaseShader):
         self["line_type"] = "line"
         self["dashing"] = False
         self["thickness_space"] = material.thickness_space
+        self["dash_scaling"] = "continuous"
+        self["cumdist_space"] = material.thickness_space
         self["aa"] = material._gfx_effective_aa
         self["loop"] = False
         self["debug"] = False
@@ -120,6 +122,7 @@ class LineShader(BaseShader):
             if not isinstance(material, LineSegmentMaterial):
                 self.needs_bake_function = True
                 self._cumdist_hash = None
+                self._dash_level = 0
                 # Like the loop buffer, this buffer is one larger when looping, so
                 # that the node that closes a loop can store the cumulative distance
                 # of the full loop (see _bake_line_distance).
@@ -128,6 +131,17 @@ class LineShader(BaseShader):
                         (geometry.positions.nitems + int(self["loop"]),), np.float32
                     )
                 )
+                # A quantized dash pattern is baked in model space, so that it is
+                # anchored to the object and cannot slide; only its period follows
+                # the view scale, in powers of two. This only has an effect when
+                # the pattern is sized in screen space, because in the other
+                # thickness spaces the pattern is anchored to the object already.
+                if (
+                    material.dash_scaling == "quantized"
+                    and material.thickness_space == "screen"
+                ):
+                    self["dash_scaling"] = "quantized"
+                    self["cumdist_space"] = "model"
 
     def bake_function(self, wobject, camera, logical_size):
         if hasattr(self, "line_loop_buffer"):
@@ -198,6 +212,64 @@ class LineShader(BaseShader):
 
         loop_buffer.update_range(r_offset, r_size + 1)
 
+    def _get_model_units_per_pixel(self, wobject, camera, logical_size, positions):
+        """How many model units one logical pixel spans, at the middle of the line.
+
+        This is the same trick the shader uses for `thickness_ratio` (see
+        line.wgsl): take a reference point, shift it by one logical pixel on
+        screen, transform it back, and measure how far it moved in model space.
+        Under a perspective camera the answer varies along the line; a single
+        representative value is taken, which is what makes this a per-object
+        level of detail rather than a per-fragment one.
+        """
+        finites = positions[np.isfinite(positions).all(axis=1)]
+        if len(finites) == 0:
+            return None
+        reference = 0.5 * (finites.min(axis=0) + finites.max(axis=0))
+
+        matrix = camera.camera_matrix @ wobject.world.matrix
+        try:
+            matrix_inv = np.linalg.inv(matrix)
+        except np.linalg.LinAlgError:
+            return None
+
+        # One logical pixel, in ndc. The bake maps ndc to logical pixels with
+        # `0.5 * logical_size`, so a pixel is `2 / logical_size` of ndc.
+        ndc = la.vec_transform(reference, matrix)
+        pixel_ndc = 2.0 / np.maximum(1.0, np.asarray(logical_size, float))
+
+        offset_x = np.array([pixel_ndc[0], 0.0, 0.0])
+        offset_y = np.array([0.0, pixel_ndc[1], 0.0])
+        origin = la.vec_transform(ndc, matrix_inv)
+        shifted_x = la.vec_transform(ndc + offset_x, matrix_inv)
+        shifted_y = la.vec_transform(ndc + offset_y, matrix_inv)
+        # Average the two, so that anisotropic scaling lands in the middle
+        units_per_pixel = 0.5 * (
+            np.linalg.norm(shifted_x - origin) + np.linalg.norm(shifted_y - origin)
+        )
+
+        if not np.isfinite(units_per_pixel) or units_per_pixel <= 0:
+            return None
+        return float(units_per_pixel)
+
+    def _get_dash_level(self, wobject, camera, logical_size, positions):
+        """The power of two that the quantized dash period is snapped to.
+
+        The pattern wants one dash unit to cover `material.thickness` logical
+        pixels, which is `thickness * units_per_pixel` model units. Rounding the
+        log2 of that to an integer keeps the on-screen size within a factor of
+        sqrt(2) of what was asked for, and -- because the dash starts of one
+        level are a subset of those of the next finer level -- means that a
+        change of level splits every dash in two rather than moving any of them.
+        """
+        units_per_pixel = self._get_model_units_per_pixel(
+            wobject, camera, logical_size, positions
+        )
+        thickness = wobject.material.thickness
+        if units_per_pixel is None or thickness <= 0:
+            return self._dash_level  # keep whatever we had
+        return round(float(np.log2(thickness * units_per_pixel)))
+
     def _bake_line_distance(self, wobject, camera, logical_size):
         # Prepare
         positions_buffer = wobject.geometry.positions
@@ -210,10 +282,24 @@ class LineShader(BaseShader):
         finites = np.isfinite(positions_array).all(axis=1)
         has_non_finites = not finites.all()
 
+        # A quantized pattern is measured in model space, and then divided by the
+        # length of one dash unit, so that the buffer holds the phase directly.
+        # That length follows the view scale, but only in powers of two, so it
+        # changes rarely: the whole bake can be skipped while the level holds.
+        quantized = self["dash_scaling"] == "quantized"
+        if quantized:
+            self._dash_level = self._get_dash_level(
+                wobject, camera, logical_size, positions_array
+            )
+
         # Get vertices in the appropriate coordinate frame
-        if wobject.material.thickness_space == "model":
-            # Skip this step if the position data has not changed
-            cumdist_hash = (id(positions_buffer), positions_buffer.rev)
+        if self["cumdist_space"] == "model":
+            # Skip this step if neither the positions nor the level have changed
+            cumdist_hash = (
+                id(positions_buffer),
+                positions_buffer.rev,
+                self._dash_level if quantized else None,
+            )
             if cumdist_hash == self._cumdist_hash:
                 return
             self._cumdist_hash = cumdist_hash
@@ -225,7 +311,7 @@ class LineShader(BaseShader):
             else:
                 positions_array_sub = positions_array
             # Transform
-            if wobject.material.thickness_space == "world":
+            if self["cumdist_space"] == "world":
                 vertex_array_sub = la.vec_transform(
                     positions_array_sub, wobject.world.matrix
                 )
@@ -289,6 +375,16 @@ class LineShader(BaseShader):
                     full_distance_array[i_last] + closing_distance
                 )
             r_size += 1  # the connector of the last loop can sit just past the range
+
+        # Convert model units to dash units. One dash unit spans 2**level model
+        # units, which is the power of two nearest to the `thickness` logical
+        # pixels that the pattern asks for. Because the level only ever doubles
+        # or halves, the dash starts of one level are a subset of those of the
+        # next finer level, so the dashes split rather than slide.
+        if quantized:
+            self.line_distance_buffer.data[r_offset : r_offset + r_size] /= (
+                2.0**self._dash_level
+            )
 
         # Mark that the data has changed
         self.line_distance_buffer.update_range(r_offset, r_size)

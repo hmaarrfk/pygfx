@@ -10,6 +10,7 @@ The enums used in pygfx. The enums are all available from the root ``pygfx`` nam
     BindMode
     ColorMode
     CoordSpace
+    DashScaling
     EdgeMode
     ElementFormat
     InterpolationFilter
@@ -32,6 +33,7 @@ __all__ = [
     "BindMode",
     "ColorMode",
     "CoordSpace",
+    "DashScaling",
     "EdgeMode",
     "ElementFormat",
     "InterpolationFilter",
@@ -129,6 +131,13 @@ class CoordSpace(Enum):
     model = None  #: The space relative to the object. When the object (or a parent) is e.g. scaled with ``wobject.local.scale = 2`` the thing becomes bigger.
     world = None  #: The space of the scene (the root object). Scaling or rotating of objects does not affect the thing's size or orientation.
     screen = None  #: The screen space (in logical pixels). The thing's size is not affected by zooming or scaling.
+
+
+class DashScaling(Enum):
+    """The DashScaling enum specifies how a line's dash pattern behaves when the view scale changes."""
+
+    continuous = None  #: The dash pattern keeps the size given by ``dash_pattern`` and ``thickness_space``. When ``thickness_space`` is 'screen', the on-screen dash size is constant, but the dashes slide along the line as you zoom, increasingly so with the distance from the start of the line.
+    quantized = None  #: The dash pattern is anchored to the object, and its period is snapped to a power of two so that its on-screen size stays close to the size that ``dash_pattern`` asks for. The dashes do not move when you zoom: each time the view scale doubles, every dash splits in two.
 
 
 class MarkerShape(Enum):

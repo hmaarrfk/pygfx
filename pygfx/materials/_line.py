@@ -1,7 +1,7 @@
 from ._base import Material
 from ..resources import Texture, TextureMap
 from ..utils import unpack_bitfield, Color, assert_type
-from ..utils.enums import ColorMode, CoordSpace
+from ..utils.enums import ColorMode, CoordSpace, DashScaling
 
 
 class LineMaterial(Material):
@@ -25,6 +25,8 @@ class LineMaterial(Material):
         The pattern of the dash, e.g. `[2, 3]`. See `dash_pattern` docs for details. Defaults to an empty tuple, i.e. no dashing.
     dash_offset : float
         The offset into the dash phase. Default 0.0.
+    dash_scaling : str | DashScaling
+        How the dash pattern behaves when the view scale changes ('continuous', 'quantized'). Default 'continuous'.
     loop : bool
         Whether the line's end should be connected. Default False.
     aa : bool
@@ -52,6 +54,7 @@ class LineMaterial(Material):
         maprange=None,
         dash_pattern=(),
         dash_offset=0,
+        dash_scaling="continuous",
         loop=False,
         aa=False,
         **kwargs,
@@ -66,6 +69,7 @@ class LineMaterial(Material):
         self.maprange = maprange
         self.dash_pattern = dash_pattern
         self.dash_offset = dash_offset
+        self.dash_scaling = dash_scaling
         self.loop = loop
         self.aa = aa
 
@@ -245,6 +249,42 @@ class LineMaterial(Material):
     def dash_offset(self, value):
         self.uniform_buffer.data["dash_offset"] = float(value)
         self.uniform_buffer.update_full()
+
+    @property
+    def dash_scaling(self):
+        """How the dash pattern responds to a change in view scale.
+
+        See :obj:`pygfx.utils.enums.DashScaling`.
+
+        With the default 'continuous', the dash pattern has exactly the size
+        that `dash_pattern` and `thickness_space` ask for. The catch, when
+        `thickness_space` is 'screen', is that the number of dashes along the
+        line then changes continuously as you zoom, so the dashes slide along
+        the line. A dash drifts by an amount proportional to its distance from
+        the start of its line piece, which makes the far end of a long line
+        appear to race while the near end sits still.
+
+        With 'quantized', the pattern is instead anchored to the object, and
+        only its period is allowed to follow the view scale, snapped to a power
+        of two. Dashes therefore never move: each time the view scale doubles,
+        every dash splits into two, and each time it halves, pairs of dashes
+        merge. The price is that the on-screen dash size is only approximately
+        the requested one; it stays within a factor of sqrt(2) of it.
+
+        Note that with 'quantized' the `dash_offset` is expressed in periods
+        rather than in units of the pattern, because only a whole number of
+        periods keeps the dashes from moving when the period changes.
+        """
+        return self._store.dash_scaling
+
+    @dash_scaling.setter
+    def dash_scaling(self, value):
+        value = "continuous" if value is None else str(value)
+        if value not in DashScaling:
+            raise ValueError(
+                f"LineMaterial.dash_scaling must be a string in {DashScaling}, not {value!r}"
+            )
+        self._store.dash_scaling = value
 
     @property
     def loop(self) -> bool:
