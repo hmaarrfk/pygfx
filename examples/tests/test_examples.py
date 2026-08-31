@@ -32,7 +32,23 @@ examples_to_run = [ex[0] for ex in examples_info if ex[2] == "run"]
 examples_to_compare = [ex[0] for ex in examples_info if ex[2] == "compare"]
 
 
+# The maximum difference allowed for any single value, per example.
 CUSTOM_TOLERANCES = {"validate_text_md": 2}
+
+# Rendering is deterministic on a given machine, but it is not bit-identical
+# across machines. Llvmpipe JITs its shaders for the host CPU, and some of the
+# instructions it leans on (the approximate reciprocals in particular) are only
+# specified to about 12 bits, so their low bits are implementation defined. On
+# CI that shows up as a few hundred values, out of millions, moving by 2 or 3
+# levels on the examples that have a steep colormap or a lot of antialiased
+# edges: the exact same commit renders one way on every AMD runner and another
+# way on an Intel one. See #1318.
+#
+# So allow a value to exceed `atol`, but only slightly, and only for a small
+# fraction of the image. A real regression either moves values much further
+# than NOISE_ATOL, or moves far more of them than NOISE_FRACTION.
+NOISE_ATOL = 3
+NOISE_FRACTION = 0.001
 
 
 class LogHandler(logging.Handler):
@@ -153,18 +169,39 @@ def test_examples_compare(filename, pytestconfig, prep_environment, mock_time):
     # assert similarity
     atol = CUSTOM_TOLERANCES.get(module_name, 1)
     try:
-        np.testing.assert_allclose(img, stored_img, atol=atol)
+        check_similar(img, stored_img, atol=atol)
         is_similar = True
-    except Exception as e:
+    except AssertionError as e:
         is_similar = False
         raise AssertionError(
-            f"rendered image for example {module_name} changed, see "
+            f"rendered image for example {module_name} changed ({e}), see "
             f"the {diffs_dir.relative_to(ROOT).as_posix()} folder"
             " for visual diffs (you can download this folder from"
             " CI build artifacts as well)"
         ) from e
     finally:
         update_diffs(module_name, is_similar, img, stored_img, atol=atol)
+
+
+def check_similar(img, stored_img, *, atol):
+    """Raise an AssertionError if img differs from stored_img by more than
+    the tolerances described at the top of this module."""
+    if img.shape != stored_img.shape:
+        raise AssertionError(f"shape changed from {stored_img.shape} to {img.shape}")
+
+    diff = np.abs(img.astype("i4") - stored_img.astype("i4"))
+    noise_atol = max(atol, NOISE_ATOL)
+    n_above_atol = int((diff > atol).sum())
+    n_above_noise_atol = int((diff > noise_atol).sum())
+    n_allowed = int(NOISE_FRACTION * diff.size)
+
+    if n_above_noise_atol or n_above_atol > n_allowed:
+        raise AssertionError(
+            f"{n_above_atol} of {diff.size} values are off by more than "
+            f"atol={atol} ({n_allowed} allowed), of which {n_above_noise_atol} "
+            f"by more than {noise_atol} (0 allowed); largest difference "
+            f"is {int(diff.max())}"
+        )
 
 
 def import_from_path(module_name, filename):

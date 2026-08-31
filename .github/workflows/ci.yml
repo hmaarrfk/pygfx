@@ -135,16 +135,22 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Not 3.10: imgui-bundle has published cp311+ wheels only since 1.6.0,
+          # and we need >=1.92 because that is what wgpu-py's imgui extra
+          # requires. On 3.10 pip therefore falls back to the sdist, and that
+          # build fails (nanobind signature mismatch in pybind_imgui.cpp) after
+          # about five minutes. So 3.11 is the oldest python the examples can be
+          # tested on, even though pygfx itself still supports 3.10.
           - os: ubuntu-latest
-            pyversion: '3.10'
+            pyversion: '3.11'
           - os: ubuntu-latest
             pyversion: '3.13'
     steps:
     - uses: actions/checkout@v4
-    - name: Set up Python
+    - name: Set up Python ${{ matrix.pyversion }}
       uses: actions/setup-python@v5
       with:
-        python-version: 3.12
+        python-version: ${{ matrix.pyversion }}
     - name: Install llvmpipe and lavapipe for offscreen canvas
       run: |
         sudo apt-get update -y -qq
