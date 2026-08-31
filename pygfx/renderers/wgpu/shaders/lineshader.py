@@ -28,6 +28,13 @@ from .. import (
 
 renderer_uniform_type = dict(last_i="i4")
 
+# How far past the halfway point the view scale must go before a quantized dash
+# pattern moves to the next level. Zero would mean a plain threshold, which
+# flickers when the view sits near it. This widens the range over which the
+# on-screen dash size can stray from the requested one, from a factor of
+# 2**0.5 to a factor of 2**(0.5 + DASH_LEVEL_HYSTERESIS).
+DASH_LEVEL_HYSTERESIS = 0.1
+
 
 @register_wgpu_render_function(Line, LineMaterial)
 class LineShader(BaseShader):
@@ -122,7 +129,7 @@ class LineShader(BaseShader):
             if not isinstance(material, LineSegmentMaterial):
                 self.needs_bake_function = True
                 self._cumdist_hash = None
-                self._dash_level = 0
+                self._dash_level = None
                 # Like the loop buffer, this buffer is one larger when looping, so
                 # that the node that closes a loop can store the cumulative distance
                 # of the full loop (see _bake_line_distance).
@@ -256,19 +263,31 @@ class LineShader(BaseShader):
         """The power of two that the quantized dash period is snapped to.
 
         The pattern wants one dash unit to cover `material.thickness` logical
-        pixels, which is `thickness * units_per_pixel` model units. Rounding the
-        log2 of that to an integer keeps the on-screen size within a factor of
-        sqrt(2) of what was asked for, and -- because the dash starts of one
-        level are a subset of those of the next finer level -- means that a
-        change of level splits every dash in two rather than moving any of them.
+        pixels, which is `thickness * units_per_pixel` model units. Snapping the
+        log2 of that to an integer means that a change of level splits every
+        dash in two rather than moving any of them, because the dash starts of
+        one level are a subset of those of the next finer level.
+
+        The snapping is done with hysteresis, i.e. as a Schmitt trigger: the
+        current level is kept until the ideal level is clearly past the halfway
+        point. Without it, a view that sits near a boundary (a slow zoom, or
+        just camera jitter) would flip between two levels from frame to frame,
+        and the dashes would visibly stutter between splitting and merging.
+        The price is that the on-screen dash size may stray a little further
+        from the requested one; see DASH_LEVEL_HYSTERESIS.
         """
         units_per_pixel = self._get_model_units_per_pixel(
             wobject, camera, logical_size, positions
         )
         thickness = wobject.material.thickness
         if units_per_pixel is None or thickness <= 0:
-            return self._dash_level  # keep whatever we had
-        return round(float(np.log2(thickness * units_per_pixel)))
+            return self._dash_level or 0  # keep whatever we had
+        ideal_level = float(np.log2(thickness * units_per_pixel))
+        if self._dash_level is None:
+            return round(ideal_level)  # nothing to be hysteretic about yet
+        if abs(ideal_level - self._dash_level) < 0.5 + DASH_LEVEL_HYSTERESIS:
+            return self._dash_level
+        return round(ideal_level)
 
     def _bake_line_distance(self, wobject, camera, logical_size):
         # Prepare

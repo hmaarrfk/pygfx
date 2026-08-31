@@ -269,7 +269,10 @@ class LineMaterial(Material):
         of two. Dashes therefore never move: each time the view scale doubles,
         every dash splits into two, and each time it halves, pairs of dashes
         merge. The price is that the on-screen dash size is only approximately
-        the requested one; it stays within a factor of sqrt(2) of it.
+        the requested one, staying within about a factor of 1.5 of it, and
+        that it changes in steps rather than smoothly. The step is snapped with
+        hysteresis, so a view parked near a boundary does not flicker between
+        two levels.
 
         Note that with 'quantized' the `dash_offset` is expressed in periods
         rather than in units of the pattern, because only a whole number of

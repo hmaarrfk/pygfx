@@ -7,7 +7,10 @@ values have exact expected answers, which makes the assertions sharp.
 
 import numpy as np
 import pygfx as gfx
-from pygfx.renderers.wgpu.shaders.lineshader import LineShader
+from pygfx.renderers.wgpu.shaders.lineshader import (
+    LineShader,
+    DASH_LEVEL_HYSTERESIS,
+)
 
 
 NAN = np.full((1, 3), np.nan, np.float32)
@@ -217,6 +220,85 @@ def test_quantized_on_screen_size_stays_near_the_requested_one():
         assert (
             thickness / np.sqrt(2) - 1e-6 <= on_screen <= thickness * np.sqrt(2) + 1e-6
         )
+
+
+def test_quantized_level_does_not_flicker_at_a_boundary():
+    """The level snap has hysteresis, so a view parked on a boundary is stable.
+
+    Without it, jitter of a fraction of a percent flips the level on more than
+    half of all frames, and the dashes stutter between splitting and merging.
+    """
+    positions = np.array([[0, 0, 0], [100, 0, 0]], np.float32)
+    line = gfx.Line(
+        gfx.Geometry(positions=positions),
+        gfx.LineMaterial(
+            thickness=10,
+            dash_pattern=[2, 2],
+            thickness_space="screen",
+            dash_scaling="quantized",
+        ),
+    )
+    shader = LineShader(line)
+    # thickness * view_width / logical_size == 2 ** (level + 0.5) at a boundary
+    boundary = 100 * 2**0.5
+    rng = np.random.default_rng(0)
+
+    levels = []
+    for _ in range(200):
+        view_width = boundary * (1 + rng.uniform(-0.05, 0.05))
+        shader.bake_function(
+            line, gfx.OrthographicCamera(view_width, view_width), (1000, 1000)
+        )
+        levels.append(shader._dash_level)
+    assert len(set(levels)) == 1, f"level flickered between {sorted(set(levels))}"
+
+
+def test_quantized_level_still_follows_a_real_zoom():
+    """Hysteresis must delay a level change, not prevent it."""
+    positions = np.array([[0, 0, 0], [100, 0, 0]], np.float32)
+    line = gfx.Line(
+        gfx.Geometry(positions=positions),
+        gfx.LineMaterial(
+            thickness=10,
+            dash_pattern=[2, 2],
+            thickness_space="screen",
+            dash_scaling="quantized",
+        ),
+    )
+    shader = LineShader(line)
+    levels = []
+    for view_width in np.geomspace(400, 50, 60):  # a 3-octave zoom in
+        shader.bake_function(
+            line, gfx.OrthographicCamera(view_width, view_width), (1000, 1000)
+        )
+        levels.append(shader._dash_level)
+    # Monotonically decreasing, one step at a time, spanning three octaves
+    steps = np.diff(levels)
+    assert set(np.unique(steps)) <= {0, -1}
+    assert levels[0] - levels[-1] == 3
+
+
+def test_quantized_on_screen_size_stays_bounded_while_zooming():
+    """With hysteresis the dash size may stray a bit further, but stays bounded."""
+    positions = np.array([[0, 0, 0], [100, 0, 0]], np.float32)
+    thickness, logical = 10.0, 1000
+    line = gfx.Line(
+        gfx.Geometry(positions=positions),
+        gfx.LineMaterial(
+            thickness=thickness,
+            dash_pattern=[2, 2],
+            thickness_space="screen",
+            dash_scaling="quantized",
+        ),
+    )
+    shader = LineShader(line)
+    bound = 2 ** (0.5 + DASH_LEVEL_HYSTERESIS)
+    for view_width in np.geomspace(400, 40, 200):
+        shader.bake_function(
+            line, gfx.OrthographicCamera(view_width, view_width), (logical, logical)
+        )
+        on_screen = 2.0**shader._dash_level / (view_width / logical)
+        assert 1 / bound - 1e-6 <= on_screen / thickness <= bound + 1e-6
 
 
 def test_quantized_rebakes_only_when_the_level_changes():
