@@ -2,35 +2,36 @@
 Dash scaling
 ============
 
-The four ways a dash pattern can respond to zoom. Scroll to zoom, drag to pan.
+How the dash pattern responds to zoom. Scroll to zoom, drag to pan.
 
-All four rows are the same geometry with the same ``dash_pattern``. What differs
-is ``thickness_space``, which says what the pattern is measured in, and
-``dash_scaling``, which says how that measurement is allowed to follow the view.
+All four rows are the same geometry with the same ``dash_pattern``. They do not
+look the same, and that is the point: each has settled on a different dash size
+for this particular view, within the range its settings allow.
 
-* **screen + continuous** (red) is the default. The dashes keep exactly the
-  on-screen size asked for, but to do that their number along the line has to
-  change continuously, so they slide. A dash drifts in proportion to its
-  distance from the start of its line piece, which is why the far end of the
-  long line races while the near end barely moves.
+The top row is the default, ``dash_scaling="continuous"``: the dashes keep
+exactly the on-screen size asked for, but to do that their number along the
+line has to change continuously, so they slide. A dash drifts in proportion to
+its distance from the start of its line piece, which is why the far end of the
+long line races while the near end barely moves.
 
-* **screen + quantized** (green) anchors the pattern to the object and lets only
-  its period follow the view, snapped to a power of two. Nothing ever slides:
-  each time you zoom in by a factor of two, every dash splits in half and a new
-  dash appears in each gap. Between splits the dashes breathe on screen by up to
-  about 1.5x, and the level is snapped with hysteresis so that a view parked on
-  a boundary does not flicker between two levels.
+The other three are ``dash_scaling="quantized"``, which anchors the pattern to
+the object and lets only its period follow the view, snapped to a power of two.
+Nothing slides: each time the period changes, every dash splits in two (or
+pairs of dashes merge), and no dash ever moves. The dashes therefore have to
+change size between splits, over a range of exactly a factor of two -- that
+width is what makes them split instead of move, and is not adjustable. What
+``dash_max_scale`` chooses is where that factor of two sits relative to the
+size you asked for:
 
-* **model** (blue) measures the pattern in the object's own units, so the
-  pattern is painted onto the geometry. Nothing slides here either, but nothing
-  splits: zoom in far enough and one dash fills the screen.
+* ``dash_max_scale=2`` -- never finer than asked. Dashes grow to twice the
+  requested size, then split back to it.
+* ``dash_max_scale=sqrt(2)`` (the default) -- straddles the requested size, so
+  the dashes are never off by more than sqrt(2) in either direction.
+* ``dash_max_scale=1`` -- never coarser than asked. Dashes shrink to half the
+  requested size, then merge back to it.
 
-* **world** (yellow) is the same, in scene units, so it ignores the object's own
-  transform but still scales with the camera.
-
-Note while comparing: ``thickness_space`` governs the line *thickness* as well
-as the pattern, so the bottom two rows also get thicker as you zoom in. Only the
-top two keep a constant on-screen thickness.
+Watch the far end of the long line for the sliding, and watch any one dash to
+see it split rather than move.
 """
 
 # sphinx_gallery_pygfx_docs = 'screenshot'
@@ -73,35 +74,34 @@ def geometry(y):
     )
 
 
-# thickness_space, dash_scaling, colour, and what it does while you zoom
+# dash_scaling, dash_max_scale, colour, label
 VARIANTS = [
-    ("screen", "continuous", "#f55", "screen + continuous: constant size, slides"),
-    ("screen", "quantized", "#5f5", "screen + quantized: splits, never slides"),
-    ("model", "continuous", "#59f", "model: painted on the object, never splits"),
+    ("continuous", None, "#f55", "continuous: exact size, but slides"),
+    ("quantized", 2.0, "#5f5", "quantized, dash_max_scale=2: never finer than asked"),
     (
-        "world",
-        "continuous",
-        "#fd5",
-        "world: as model, but ignores the object transform",
+        "quantized",
+        2**0.5,
+        "#59f",
+        "quantized, dash_max_scale=sqrt(2): closest to asked",
     ),
+    ("quantized", 1.0, "#fd5", "quantized, dash_max_scale=1: never coarser than asked"),
 ]
 
-for i, (thickness_space, dash_scaling, color, label) in enumerate(VARIANTS):
+for i, (dash_scaling, dash_max_scale, color, label) in enumerate(VARIANTS):
     y = 240 - i * 170
-    scene.add(
-        gfx.Line(
-            geometry(y),
-            gfx.LineMaterial(
-                thickness=8,
-                color=color,
-                loop=True,
-                aa=True,
-                dash_pattern=[2, 2],
-                thickness_space=thickness_space,
-                dash_scaling=dash_scaling,
-            ),
-        )
+    material = gfx.LineMaterial(
+        thickness=8,
+        color=color,
+        loop=True,
+        aa=True,
+        dash_pattern=[2, 2],
+        thickness_space="screen",
+        dash_scaling=dash_scaling,
     )
+    if dash_max_scale is not None:
+        material.dash_max_scale = dash_max_scale
+    scene.add(gfx.Line(geometry(y), material))
+
     text = gfx.Text(
         text=label,
         font_size=15,

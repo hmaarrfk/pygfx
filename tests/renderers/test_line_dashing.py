@@ -6,6 +6,7 @@ values have exact expected answers, which makes the assertions sharp.
 """
 
 import numpy as np
+import pytest
 import pygfx as gfx
 from pygfx.renderers.wgpu.shaders.lineshader import (
     LineShader,
@@ -278,27 +279,60 @@ def test_quantized_level_still_follows_a_real_zoom():
     assert levels[0] - levels[-1] == 3
 
 
-def test_quantized_on_screen_size_stays_bounded_while_zooming():
-    """With hysteresis the dash size may stray a bit further, but stays bounded."""
+def test_dash_max_scale_places_the_octave():
+    """`dash_max_scale` chooses where the factor-of-two band sits.
+
+    The band is always exactly one octave wide -- that is what makes a level
+    change split each dash rather than move it -- so the only freedom is where
+    it sits relative to the size that `dash_pattern` asks for.
+    """
     positions = np.array([[0, 0, 0], [100, 0, 0]], np.float32)
     thickness, logical = 10.0, 1000
-    line = gfx.Line(
-        gfx.Geometry(positions=positions),
-        gfx.LineMaterial(
-            thickness=thickness,
-            dash_pattern=[2, 2],
-            thickness_space="screen",
-            dash_scaling="quantized",
-        ),
-    )
-    shader = LineShader(line)
-    bound = 2 ** (0.5 + DASH_LEVEL_HYSTERESIS)
-    for view_width in np.geomspace(400, 40, 200):
-        shader.bake_function(
-            line, gfx.OrthographicCamera(view_width, view_width), (logical, logical)
+    overshoot = 2**DASH_LEVEL_HYSTERESIS  # hysteresis lets it stray this much
+
+    for dash_max_scale in [1.0, 2**0.5, 2.0]:
+        line = gfx.Line(
+            gfx.Geometry(positions=positions),
+            gfx.LineMaterial(
+                thickness=thickness,
+                dash_pattern=[2, 2],
+                thickness_space="screen",
+                dash_scaling="quantized",
+                dash_max_scale=dash_max_scale,
+            ),
         )
-        on_screen = 2.0**shader._dash_level / (view_width / logical)
-        assert 1 / bound - 1e-6 <= on_screen / thickness <= bound + 1e-6
+        shader = LineShader(line)
+        ratios, levels = [], []
+        for view_width in np.geomspace(400, 25, 400):  # four octaves of zoom
+            shader.bake_function(
+                line, gfx.OrthographicCamera(view_width, view_width), (logical, logical)
+            )
+            ratios.append(2.0**shader._dash_level / (view_width / logical) / thickness)
+            levels.append(shader._dash_level)
+
+        # the level only ever steps down, one at a time
+        assert set(np.diff(levels)) <= {0, -1}
+        # and the size stays inside the octave, give or take the hysteresis
+        assert min(ratios) >= dash_max_scale / 2 / overshoot - 1e-6
+        assert max(ratios) <= dash_max_scale * overshoot + 1e-6
+        # the band really is a factor of two wide, not something narrower
+        assert max(ratios) / min(ratios) > 1.5
+
+
+def test_dash_max_scale_default_matches_round():
+    """The default sqrt(2) is exactly the `round(log2(...))` behaviour."""
+    positions = np.array([[0, 0, 0], [100, 0, 0]], np.float32)
+    for view_width, expected_level in [(400, 2), (200, 1), (100, 0), (50, -1)]:
+        _, level = bake_quantized(positions, view_width)
+        assert level == expected_level
+
+
+def test_dash_max_scale_is_validated():
+    material = gfx.LineMaterial(dash_pattern=[2, 2])
+    assert material.dash_max_scale == 2**0.5
+    for bad in [0.9, 2.1]:
+        with pytest.raises(ValueError):
+            material.dash_max_scale = bad
 
 
 def test_quantized_rebakes_only_when_the_level_changes():

@@ -28,11 +28,10 @@ from .. import (
 
 renderer_uniform_type = dict(last_i="i4")
 
-# How far past the halfway point the view scale must go before a quantized dash
+# How far past a level boundary the view scale must go before a quantized dash
 # pattern moves to the next level. Zero would mean a plain threshold, which
-# flickers when the view sits near it. This widens the range over which the
-# on-screen dash size can stray from the requested one, from a factor of
-# 2**0.5 to a factor of 2**(0.5 + DASH_LEVEL_HYSTERESIS).
+# flickers when the view sits near it. This lets the on-screen dash size
+# overshoot its octave by a factor of 2**DASH_LEVEL_HYSTERESIS at each end.
 DASH_LEVEL_HYSTERESIS = 0.1
 
 
@@ -268,26 +267,43 @@ class LineShader(BaseShader):
         dash in two rather than moving any of them, because the dash starts of
         one level are a subset of those of the next finer level.
 
+        Successive levels differ by a factor of two, so the on-screen dash size
+        always ranges over exactly one octave; that width is what makes the
+        dashes split rather than move, and is not adjustable. Where that octave
+        sits relative to the requested size is, via `material.dash_max_scale`:
+        it enters here as a bias on the level, so that a dash is allowed to grow
+        to `dash_max_scale` times the requested size before it splits.
+
         The snapping is done with hysteresis, i.e. as a Schmitt trigger: the
-        current level is kept until the ideal level is clearly past the halfway
-        point. Without it, a view that sits near a boundary (a slow zoom, or
+        current level is kept until the ideal level is clearly past the
+        boundary. Without it, a view that sits near a boundary (a slow zoom, or
         just camera jitter) would flip between two levels from frame to frame,
         and the dashes would visibly stutter between splitting and merging.
-        The price is that the on-screen dash size may stray a little further
-        from the requested one; see DASH_LEVEL_HYSTERESIS.
+        The price is that the dashes may overshoot the octave a little; see
+        DASH_LEVEL_HYSTERESIS.
         """
         units_per_pixel = self._get_model_units_per_pixel(
             wobject, camera, logical_size, positions
         )
-        thickness = wobject.material.thickness
+        material = wobject.material
+        thickness = material.thickness
         if units_per_pixel is None or thickness <= 0:
             return self._dash_level or 0  # keep whatever we had
-        ideal_level = float(np.log2(thickness * units_per_pixel))
+
+        # Where in the octave to snap. The size ratio works out as
+        # 2**(level - ideal), and level = floor(ideal + bias), so the ratio
+        # spans [2**(bias-1), 2**bias]: the bias is the log2 of the largest
+        # scale we allow. A bias of 0.5 recovers round().
+        bias = float(np.log2(material.dash_max_scale))
+        biased_level = float(np.log2(thickness * units_per_pixel)) + bias
+
         if self._dash_level is None:
-            return round(ideal_level)  # nothing to be hysteretic about yet
-        if abs(ideal_level - self._dash_level) < 0.5 + DASH_LEVEL_HYSTERESIS:
+            return int(np.floor(biased_level))  # nothing to be hysteretic about yet
+        low = self._dash_level - DASH_LEVEL_HYSTERESIS
+        high = self._dash_level + 1.0 + DASH_LEVEL_HYSTERESIS
+        if low <= biased_level < high:
             return self._dash_level
-        return round(ideal_level)
+        return int(np.floor(biased_level))
 
     def _bake_line_distance(self, wobject, camera, logical_size):
         # Prepare

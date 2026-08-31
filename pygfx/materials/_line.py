@@ -27,6 +27,8 @@ class LineMaterial(Material):
         The offset into the dash phase. Default 0.0.
     dash_scaling : str | DashScaling
         How the dash pattern behaves when the view scale changes ('continuous', 'quantized'). Default 'continuous'.
+    dash_max_scale : float
+        For 'quantized' scaling, the largest the dashes may grow, relative to the requested size, before they split. Default sqrt(2).
     loop : bool
         Whether the line's end should be connected. Default False.
     aa : bool
@@ -55,6 +57,7 @@ class LineMaterial(Material):
         dash_pattern=(),
         dash_offset=0,
         dash_scaling="continuous",
+        dash_max_scale=2**0.5,
         loop=False,
         aa=False,
         **kwargs,
@@ -70,6 +73,7 @@ class LineMaterial(Material):
         self.dash_pattern = dash_pattern
         self.dash_offset = dash_offset
         self.dash_scaling = dash_scaling
+        self.dash_max_scale = dash_max_scale
         self.loop = loop
         self.aa = aa
 
@@ -288,6 +292,46 @@ class LineMaterial(Material):
                 f"LineMaterial.dash_scaling must be a string in {DashScaling}, not {value!r}"
             )
         self._store.dash_scaling = value
+
+    @property
+    def dash_max_scale(self):
+        """How large the dashes may grow before they split, when `dash_scaling`
+        is 'quantized'.
+
+        Expressed as a ratio to the size that `dash_pattern` asks for, and
+        clamped to the range 1 to 2.
+
+        The dashes always range over a factor of exactly two, from
+        `dash_max_scale / 2` up to `dash_max_scale` times the requested size.
+        That width is not adjustable: the whole point of the quantization is
+        that a change of level *splits* each dash rather than moving it, which
+        requires successive levels to differ by a whole factor. Two is the
+        smallest such factor, so one octave is as narrow as the band can be.
+
+        What this property chooses is where that octave sits:
+
+        * 2.0 -- the dashes are never finer than requested. They grow to twice
+          the requested size, then split back to it.
+        * sqrt(2) (the default) -- the band straddles the requested size, which
+          keeps the dashes as close to it as possible, never off by more than
+          a factor of sqrt(2) either way.
+        * 1.0 -- the dashes are never coarser than requested. They shrink to
+          half the requested size, then merge back to it.
+
+        Note that the hysteresis on the level snap (see the `dash_scaling`
+        docs) lets the dashes overshoot this band slightly, so that a view
+        parked on a boundary does not flicker between two levels.
+        """
+        return self._store.dash_max_scale
+
+    @dash_max_scale.setter
+    def dash_max_scale(self, value):
+        value = float(value)
+        if not (1.0 <= value <= 2.0):
+            raise ValueError(
+                f"LineMaterial.dash_max_scale must be between 1 and 2, not {value!r}"
+            )
+        self._store.dash_max_scale = value
 
     @property
     def loop(self) -> bool:
