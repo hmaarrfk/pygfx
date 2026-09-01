@@ -323,14 +323,22 @@ fn fs_main(varyings: Varyings) -> @location(0) vec4<f32> {
     let rgb = pow(color.rgb, gamma3);
     let a = color.a;
 
-    // The blend factors are simply ONE and ZERO, so the values as we return them here
+    // The blend factors are simply ONE and ZERO, so the values as we return here
     // are how they end up in the target texture.
     // We assume pre-multiply alpha for now.
     // We should at some point look into this, if we want to support transparent windows,
     // and change the code here based on the ``alpha_mode`` of the ``GPUCanvasContext``.
     // Note tha alpha is multiplied with itself, which is probbaly wrong.
 
+    $$ if srgb_encode
+    // The target is a plain (non-srgb) format, so encode to srgb here rather
+    // than leaving it to the driver. See the comment at the top of
+    // colorspace.wgsl for why. Note this encodes the pre-multiplied value,
+    // which is exactly what the driver's conversion would have received.
+    return vec4f(physical2srgb(rgb * a), a * a);
+    $$ else
     return vec4f(rgb * a, a * a);
+    $$ endif
 
     // Note that the final opacity is not necessarily one. This means that
     // the framebuffer can be blended with the background, or one can render

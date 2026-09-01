@@ -63,9 +63,9 @@ def test_render_picking_simple():
     info3 = renderer.get_pick_info((66 + 16, 50))
 
     # First assert colors
-    assert info1["rgba"] == (1, 0, 0, 1)
-    assert info2["rgba"] == (1, 1, 1, 1)
-    assert info3["rgba"] == (0, 1, 0, 1)
+    assert np.allclose(info1["rgba"], (1, 0, 0, 1), atol=1e-5)
+    assert np.allclose(info2["rgba"], (1, 1, 1, 1), atol=1e-5)
+    assert np.allclose(info3["rgba"], (0, 1, 0, 1), atol=1e-5)
 
     # Assert objects
     assert info1["world_object"] is ob1
@@ -101,7 +101,7 @@ def test_render_picking_turning_on_off():
     # Render and pick!
     renderer.render(scene, camera)
     info1 = renderer.get_pick_info((50, 50))
-    assert info1["rgba"] == (1, 0, 0, 1)
+    assert np.allclose(info1["rgba"], (1, 0, 0, 1), atol=1e-5)
     assert info1["world_object"] is None  # no picking!
 
     # Turn picking on and try again
@@ -109,7 +109,7 @@ def test_render_picking_turning_on_off():
 
     renderer.render(scene, camera)
     info1 = renderer.get_pick_info((50, 50))
-    assert info1["rgba"] == (1, 0, 0, 1)
+    assert np.allclose(info1["rgba"], (1, 0, 0, 1), atol=1e-5)
     assert info1["world_object"] is ob1  # yay
 
     # Turn picking off again
@@ -117,7 +117,7 @@ def test_render_picking_turning_on_off():
 
     renderer.render(scene, camera)
     info1 = renderer.get_pick_info((50, 50))
-    assert info1["rgba"] == (1, 0, 0, 1)
+    assert np.allclose(info1["rgba"], (1, 0, 0, 1), atol=1e-5)
     assert info1["world_object"] is None
 
 
@@ -152,7 +152,7 @@ def test_render_picking_and_depth1():
     # Render and pick!
     renderer.render(scene, camera)
     info = renderer.get_pick_info((50, 50))
-    assert info["rgba"] == (1, 0, 0, 1)  # red
+    assert np.allclose(info["rgba"], (1, 0, 0, 1), atol=1e-5)  # red
     assert info["world_object"] is ob1
 
     # Now put the green square in front
@@ -161,7 +161,7 @@ def test_render_picking_and_depth1():
     # Render and pick!
     renderer.render(scene, camera)
     info = renderer.get_pick_info((50, 50))
-    assert info["rgba"] == (0, 1, 0, 1)  # green
+    assert np.allclose(info["rgba"], (0, 1, 0, 1), atol=1e-5)  # green
     assert info["world_object"] is ob2
 
 
@@ -203,7 +203,7 @@ def test_render_picking_and_depth2():
     # Render and pick!
     renderer.render(scene, camera)
     info = renderer.get_pick_info((50, 50))
-    assert info["rgba"] == (1, 0, 0, 1)  # red
+    assert np.allclose(info["rgba"], (1, 0, 0, 1), atol=1e-5)  # red
     assert info["world_object"] is ob1  # makes sense
 
     # Now put the green square in front
@@ -212,7 +212,7 @@ def test_render_picking_and_depth2():
     # Render and pick!
     renderer.render(scene, camera)
     info = renderer.get_pick_info((50, 50))
-    assert info["rgba"] == (0, 1, 0, 1)  # green
+    assert np.allclose(info["rgba"], (0, 1, 0, 1), atol=1e-5)  # green
     assert info["world_object"] is ob1  # huh?
 
     # The thing is that the red square is rendered first, writing
@@ -228,7 +228,7 @@ def test_render_picking_and_depth2():
     # Render and pick!
     renderer.render(scene, camera)
     info = renderer.get_pick_info((50, 50))
-    assert info["rgba"] == (0, 1, 0, 1)  # green
+    assert np.allclose(info["rgba"], (0, 1, 0, 1), atol=1e-5)  # green
     assert info["world_object"] is None  # works!
 
 

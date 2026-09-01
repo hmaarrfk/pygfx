@@ -282,23 +282,28 @@ class WgpuRenderer(RootEventHandler, Renderer):
 
         # Get target format
         self.gamma_correction = gamma_correction
-        self._gamma_correction_srgb = 1.0
+        self._srgb_encode_in_shader = False
         if isinstance(target, BaseRenderCanvas):
             self._canvas_context = self._target.get_context("wgpu")
-            # Select output format. We currently don't have a way of knowing
-            # what formats are available, so if not srgb, we gamma-correct in shader.
             target_format = self._canvas_context.get_preferred_format(
                 self._shared.adapter
             )
-            if not target_format.endswith("srgb"):
-                self._gamma_correction_srgb = 1 / 2.2  # poor man's srgb
+            # Deliberately ask for the non-srgb variant, and do the encode
+            # ourselves in the output pass. See the comment at the top of
+            # colorspace.wgsl for why we don't let the driver do it.
+            if target_format.endswith("-srgb"):
+                target_format = target_format[: -len("-srgb")]
+            self._srgb_encode_in_shader = True
             # Also configure the canvas
             self._canvas_context.configure(
                 device=self._device,
                 format=target_format,
             )
         else:
-            # Also enable the texture for render and display usage
+            # Also enable the texture for render and display usage.
+            # Note that we deliberately do not encode to srgb for texture
+            # targets: as before, they receive physical (linear) values, and
+            # it is up to the caller to interpret them.
             self._target._wgpu_usage |= wgpu.TextureUsage.RENDER_ATTACHMENT
             self._target._wgpu_usage |= wgpu.TextureUsage.TEXTURE_BINDING
 
@@ -312,7 +317,7 @@ class WgpuRenderer(RootEventHandler, Renderer):
         self.sort_objects = sort_objects
 
         # Prepare object that performs the final render step into a texture
-        self._output_pass = OutputPass()
+        self._output_pass = OutputPass(srgb_encode=self._srgb_encode_in_shader)
         self.pixel_filter = pixel_filter
 
         # Initialize a small buffer to read pixel info into
@@ -843,7 +848,7 @@ class WgpuRenderer(RootEventHandler, Renderer):
 
         # Apply copy-pass
         color_tex = self._blender.get_texture_view(src_name, src_usage)
-        self._output_pass.gamma = self._gamma_correction * self._gamma_correction_srgb
+        self._output_pass.gamma = self._gamma_correction
         # self._output_pass.filter_strength = self._pixel_filter
         self._output_pass.render(command_encoder, color_tex, None, target_tex)
 
@@ -984,7 +989,14 @@ class WgpuRenderer(RootEventHandler, Renderer):
             data = self._pixel_info_buffer.read_mapped()
         finally:
             self._pixel_info_buffer.unmap()
-        color = Color(x / 255 for x in tuple(data[0:4].cast("B")))
+        # The color texture is rgba16float and holds physical (linear) values.
+        # Report srgb, as this method always has.
+        color_tex_fmt = color_tex.format if color_tex else "rgba16float"
+        if color_tex_fmt == "rgba16float":
+            rgba = np.frombuffer(data[0:8], np.float16).astype(np.float32)
+            color = Color.from_physical(*rgba[:3], float(rgba[3]))
+        else:
+            color = Color(x / 255 for x in tuple(data[0:4].cast("B")))
         pick_value = tuple(data[8:16].cast("Q"))[0]  # noqa: RUF015
         wobject_id = pick_value & 1048575  # 2**20-1
         wobject = id_provider.get_object_from_id(wobject_id)

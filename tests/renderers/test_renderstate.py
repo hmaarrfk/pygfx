@@ -78,7 +78,9 @@ def test_renderstate_reuse2():
 def prepare_for_cleanup():
     renderer1 = gfx.renderers.WgpuRenderer(render_tex)
     renderer2 = gfx.renderers.WgpuRenderer(render_tex)
-    renderer2._blender.texture_info["color"]["format"] = "rgba16float"
+    # Any format other than the blender default, so the two renderers
+    # produce different renderstates.
+    renderer2._blender.texture_info["color"]["format"] = "rgba8unorm"
     scene1 = gfx.Scene()
     scene2 = gfx.Scene()
 

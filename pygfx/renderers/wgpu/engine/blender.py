@@ -42,27 +42,26 @@ default_targets = {
     #
     # As for storing intermediate results, using 8bit colors in linear space would
     # mean that we lose precision in regions where the human eye is sensitive.
-    # Ideally we'd use 'rgba16float', and maybe we should, it's 2025, but let's
-    # change that in a self-contained commit, because it will affect memory usage,
-    # and needs a feature?
+    # This used to be 'rgba8unorm_srgb', so that we lost precision "in a way
+    # that's linear to the human eye" instead. Also see
+    # https://github.com/pmndrs/postprocessing
     #
-    # Using 'rgba8unorm_srgb' means that in each post-effect step, the colors are
-    # stored in srgb, and auto-conveted to linear when read/written. This seems a
-    # bit weird, because from the pov of math that works on linear values, it loses
-    # precision in a non-linear way. But that way we lose precision "in a way that's
-    # linear to the human eye", which results in a better end-result than using
-    # 'rgba8unorm'. Also see https://github.com/pmndrs/postprocessing
+    # We now use half-floats, which was already the stated ideal here. That
+    # gives more precision than either 8-bit option, and it means the driver
+    # never performs a linear-to-srgb conversion on the intermediates: on
+    # llvmpipe that conversion is built on rsqrtps and is not reproducible
+    # between CPU vendors, which made the offscreen screenshot tests flaky. See
+    # the comment above srgb2physical() in std.wgsl.
     #
-    # This is 4 bytes per pixel.
-    # TODO: use half-floats
+    # This is 8 bytes per pixel, up from 4.
     "color": (
-        wgpu.TextureFormat.rgba8unorm_srgb,
+        wgpu.TextureFormat.rgba16float,
         usg.RENDER_ATTACHMENT | usg.COPY_SRC | usg.TEXTURE_BINDING,
     ),
     # A texture of the same size, to allow post-processing effects.
     # When applying effects, the color and altcolor texture are ping-ponged.
     "altcolor": (
-        wgpu.TextureFormat.rgba8unorm_srgb,
+        wgpu.TextureFormat.rgba16float,
         usg.RENDER_ATTACHMENT | usg.COPY_SRC | usg.TEXTURE_BINDING,
     ),
     # The depth buffer should preferably at least 24bit - we need that precision. It's 4 bytes per pixel.

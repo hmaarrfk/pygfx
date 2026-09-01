@@ -92,15 +92,7 @@ fn get_fragment_output(position: vec4<f32>, color: vec4<f32>) -> StubColorWrappe
     return wrapper;
 }
 
-fn srgb2physical(color: vec3<f32>) -> vec3<f32> {
-    // In Python, the below reads as
-    // c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
-    let f = pow((color + 0.055) / 1.055, vec3<f32>(2.4));
-    let t = color / 12.92;
-    return select(f, t, color <= vec3<f32>(0.04045));
-    // Simplified version with about 0.5% avg error
-    // return pow(color, vec3<f32>(2.2));
-}
+{$ include 'pygfx.colorspace.wgsl' $}
 
 
 fn do_alpha_test(alpha: f32) {
