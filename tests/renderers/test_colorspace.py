@@ -9,10 +9,7 @@ every 8-bit srgb value survives a round trip through the renderer unchanged.
 
 import numpy as np
 import pygfx as gfx
-import pytest
 from rendercanvas.offscreen import RenderCanvas
-
-from ..testutils import can_use_wgpu_lib
 
 
 ALL_256 = np.arange(256, dtype=np.uint8)
@@ -38,7 +35,6 @@ def _render_ramp(colors):
     return np.asarray(renderer.target.draw())[0]
 
 
-@pytest.mark.skipif(not can_use_wgpu_lib, reason="Needs wgpu lib")
 def test_every_8bit_value_round_trips_exactly():
     """Every one of the 256 8-bit srgb values must come out of the renderer
     as itself, through srgb2physical() on the way in and physical2srgb() on
@@ -53,7 +49,6 @@ def test_every_8bit_value_round_trips_exactly():
         )
 
 
-@pytest.mark.skipif(not can_use_wgpu_lib, reason="Needs wgpu lib")
 def test_round_trip_is_monotonic():
     """A brighter input must never come out darker. Guards against a refit of
     the approximations introducing a wobble."""

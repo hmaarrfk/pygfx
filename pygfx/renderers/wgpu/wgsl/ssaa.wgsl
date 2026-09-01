@@ -315,6 +315,11 @@ fn fs_main(varyings: Varyings) -> @location(0) vec4<f32> {
     $$ endif
 
 
+    // A NaN in the colour buffer used to be swallowed by the 8-bit store; with
+    // a float buffer it survives, and the filter above spreads it over its
+    // whole footprint. Drop it, so a bad fragment stays a local artifact.
+    color = select(color, vec4<f32>(0.0), color != color);
+
     // Apply gamma
     $$ if gamma is not defined
     $$ set gamma = 1.0

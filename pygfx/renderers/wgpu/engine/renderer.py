@@ -1065,7 +1065,20 @@ class WgpuRenderer(RootEventHandler, Renderer):
             size,
         )
 
-        return np.frombuffer(data, dtype).reshape(size[1], size[0], 4)
+        im = np.frombuffer(data, dtype).reshape(size[1], size[0], 4)
+        if dtype is np.float16:
+            # The colour buffer holds physical (linear) values now. This method
+            # has always returned srgb uint8, and callers pass the result
+            # straight to e.g. PIL, so convert rather than leak the float.
+            rgb = np.clip(im[..., :3].astype(np.float32), 0, 1)
+            srgb = np.where(
+                rgb <= 0.0031308, rgb * 12.92, 1.055 * rgb ** (1 / 2.4) - 0.055
+            )
+            out = np.empty(im.shape, np.uint8)
+            out[..., :3] = np.round(srgb * 255)
+            out[..., 3] = np.round(np.clip(im[..., 3].astype(np.float32), 0, 1) * 255)
+            return out
+        return im
 
     def request_draw(self, draw_function=None):
         """Forwards a request_draw call to the target canvas. If the renderer's
