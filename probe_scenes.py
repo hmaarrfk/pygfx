@@ -7,6 +7,7 @@ upward, and hash each. The simplest scene that differs is the answer.
 import hashlib, os, sys
 os.environ["WGPU_FORCE_OFFSCREEN"] = "true"
 os.environ["PYGFX_DEFAULT_PPAA"] = "none"
+BITEXACT = os.environ.get("PROBE_BITEXACT") == "1"
 
 import numpy as np
 from rendercanvas.offscreen import RenderCanvas
