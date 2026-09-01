@@ -1,0 +1,38 @@
+# Throwaway. Does bitexact_srgb=True remove the AMD/Intel divergence?
+name: probe
+on:
+  push:
+    branches: [bitexact-srgb]
+jobs:
+  probe:
+    name: bitexact ${{ matrix.n }}
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with: {python-version: '3.12'}
+    - run: |
+        sudo apt-get update -y -qq
+        sudo apt-get install -y libegl1-mesa-dev libgl1-mesa-dri libxcb-xfixes0-dev mesa-vulkan-drivers
+    - run: python -m pip install --upgrade pip && pip install -e .[examples]
+    - name: CPU identity
+      run: |
+        echo "CPUID $(grep -m1 '^model name' /proc/cpuinfo | cut -d: -f2- | xargs) | $(grep -m1 '^vendor_id' /proc/cpuinfo | cut -d: -f2- | xargs)"
+        echo "VENDOR=$(grep -m1 '^vendor_id' /proc/cpuinfo | cut -d: -f2- | xargs)" >> $GITHUB_ENV
+    - name: Baseline (driver srgb encode)
+      env: {PYGFX_WGPU_ADAPTER_NAME: llvmpipe, PROBE_BITEXACT: "0"}
+      run: python probe_scenes.py baseline.npz
+    - name: bitexact_srgb=True (shader srgb encode)
+      env: {PYGFX_WGPU_ADAPTER_NAME: llvmpipe, PROBE_BITEXACT: "1"}
+      run: python probe_scenes.py bitexact.npz
+    - uses: actions/upload-artifact@v4
+      with:
+        name: be-${{ env.VENDOR }}-${{ matrix.n }}
+        path: |
+          baseline.npz
+          bitexact.npz

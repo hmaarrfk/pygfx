@@ -231,6 +231,42 @@ class WgpuRenderer(RootEventHandler, Renderer):
     ppaa : str, optional
         The post-processing anti-aliasing to apply: "default", "none", "fxaa", "ddaa".
         By default it resolves to "ddaa".
+    bitexact_srgb : bool
+        Render to a plain (non-srgb) target and do the linear-to-srgb encode in
+        the output pass, instead of letting the driver do it. Default False.
+
+        This exists because llvmpipe's fixed-function encode is not
+        reproducible across CPUs, which makes bit-exact screenshot comparison
+        impossible on CI. It computes
+
+            y = a * x**0.375 + b * x**0.5 + c
+
+        and obtains both powers from ``rsqrtps``, the ~12-bit approximate
+        reciprocal square root, whose low bits the x86 ISA leaves
+        implementation defined. Intel and AMD return different bits for it, so
+        the same scene renders to a different 8-bit image on the two vendors:
+        about 2% of values land on the other side of a rounding boundary.
+        Mesa's own comment on the approximation reads "the constants are magic
+        values. They were found empirically ... This function has an error of
+        max +-0.17. Not sure this is actually enough".
+
+        Mesa, pinned at 8e12d6000b247715b7c9bfaac67bca565dd8b9d8:
+
+        - the approximation and its comment:
+          src/gallium/auxiliary/gallivm/lp_bld_format_srgb.c:244-292
+          (``lp_build_linear_to_srgb``, the ``else`` branch starting line 244;
+          the ``rsqrtps`` calls are at lines 266-285)
+        - what ``lp_build_fast_rsqrt`` lowers to:
+          src/gallium/auxiliary/gallivm/lp_bld_arit.c:2616-2639
+          (``llvm.x86.sse.rsqrt.ps`` / ``llvm.x86.avx.rsqrt.ps.256``)
+        - mesa's own deterministic CPU-side encode, an integer LUT that the JIT
+          path does not use: src/util/format_srgb.h:92-126
+
+        Enabling this trades the driver's approximation for ``pow(x, 1/2.4)``
+        in the shader, which is bit-identical across CPUs. Note it changes the
+        rendered output slightly, so reference screenshots have to be
+        regenerated for it. Only meaningful on software rendering; real GPUs
+        do the conversion exactly in fixed-function hardware.
     """
 
     def __init__(
@@ -245,6 +281,7 @@ class WgpuRenderer(RootEventHandler, Renderer):
         enable_events=True,
         gamma_correction=1.0,
         ppaa="default",
+        bitexact_srgb=False,
         **kwargs,
     ):
         blend_mode = kwargs.pop("blend_mode", None)
@@ -283,6 +320,7 @@ class WgpuRenderer(RootEventHandler, Renderer):
         # Get target format
         self.gamma_correction = gamma_correction
         self._gamma_correction_srgb = 1.0
+        self._srgb_encode_in_shader = False
         if isinstance(target, BaseRenderCanvas):
             self._canvas_context = self._target.get_context("wgpu")
             # Select output format. We currently don't have a way of knowing
@@ -290,7 +328,13 @@ class WgpuRenderer(RootEventHandler, Renderer):
             target_format = self._canvas_context.get_preferred_format(
                 self._shared.adapter
             )
-            if not target_format.endswith("srgb"):
+            if bitexact_srgb:
+                # Drop the driver's fixed-function srgb encode; we do it in the
+                # output pass instead. See the `bitexact_srgb` docstring.
+                if target_format.endswith("-srgb"):
+                    target_format = target_format[: -len("-srgb")]
+                self._srgb_encode_in_shader = True
+            elif not target_format.endswith("srgb"):
                 self._gamma_correction_srgb = 1 / 2.2  # poor man's srgb
             # Also configure the canvas
             self._canvas_context.configure(
@@ -312,7 +356,7 @@ class WgpuRenderer(RootEventHandler, Renderer):
         self.sort_objects = sort_objects
 
         # Prepare object that performs the final render step into a texture
-        self._output_pass = OutputPass()
+        self._output_pass = OutputPass(srgb_encode=self._srgb_encode_in_shader)
         self.pixel_filter = pixel_filter
 
         # Initialize a small buffer to read pixel info into

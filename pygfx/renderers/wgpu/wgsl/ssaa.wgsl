@@ -320,7 +320,19 @@ fn fs_main(varyings: Varyings) -> @location(0) vec4<f32> {
     $$ set gamma = 1.0
     $$ endif
     let gamma3 = vec3<f32>({{ gamma }});
+    $$ if srgb_encode
+    // The target is a plain (non-srgb) format, so do the linear-to-srgb encode
+    // here instead of leaving it to the driver. This is the inverse of
+    // srgb2physical() in std.wgsl. See WgpuRenderer(bitexact_srgb=...).
+    let lin = pow(color.rgb, gamma3);
+    let rgb = select(
+        1.055 * pow(lin, vec3<f32>(1.0 / 2.4)) - 0.055,
+        lin * 12.92,
+        lin <= vec3<f32>(0.0031308),
+    );
+    $$ else
     let rgb = pow(color.rgb, gamma3);
+    $$ endif
     let a = color.a;
 
     // The blend factors are simply ONE and ZERO, so the values as we return them here
