@@ -346,7 +346,7 @@ class WgpuRenderer(RootEventHandler, Renderer):
             self._target._wgpu_usage |= wgpu.TextureUsage.RENDER_ATTACHMENT
             self._target._wgpu_usage |= wgpu.TextureUsage.TEXTURE_BINDING
 
-        self._blender = Blender()
+        self._blender = Blender(srgb_textures=not self._srgb_encode_in_shader)
         self._effect_passes = ()
         self.ppaa = ppaa
         self._name_of_texture_with_effects = (

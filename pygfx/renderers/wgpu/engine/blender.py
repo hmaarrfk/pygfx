@@ -100,12 +100,20 @@ class Blender:
     Each renderer has one blender object.
     """
 
-    def __init__(self, *, enable_pick=True, enable_depth=True):
+    def __init__(self, *, enable_pick=True, enable_depth=True, srgb_textures=True):
         self.device = get_shared().device
 
         # We could allow custom targets, but this is not yet implemented in the methods.
         # The code in this init shows the first steps of what that could look like.
         custom_targets = {}  # name -> (format, usage)  could allow users to specify this
+
+        if not srgb_textures:
+            # Store intermediate results in a plain (non-srgb) format, so that
+            # the driver's linear-to-srgb conversion is never invoked. Costs
+            # precision in the darks; only used by WgpuRenderer(bitexact_srgb=True).
+            for name in ("color", "altcolor"):
+                format, usage = default_targets[name]
+                custom_targets[name] = (format.replace("-srgb", ""), usage)
 
         # The size (2D in pixels) of the textures.
         self.size = (0, 0)
