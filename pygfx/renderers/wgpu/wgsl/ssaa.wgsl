@@ -330,7 +330,23 @@ fn fs_main(varyings: Varyings) -> @location(0) vec4<f32> {
     // and change the code here based on the ``alpha_mode`` of the ``GPUCanvasContext``.
     // Note tha alpha is multiplied with itself, which is probbaly wrong.
 
+    $$ if srgb_encode
+    // The target is a plain (non-srgb) format, so do the linear-to-srgb encode
+    // here instead of letting the driver do it; see WgpuRenderer for why. This
+    // is the inverse of srgb2physical() in std.wgsl. Note we encode the
+    // pre-multiplied value, which is what the driver's conversion received.
+    let pre = rgb * a;
+    return vec4f(
+        select(
+            1.055 * pow(pre, vec3<f32>(1.0 / 2.4)) - 0.055,
+            pre * 12.92,
+            pre <= vec3<f32>(0.0031308),
+        ),
+        a * a,
+    );
+    $$ else
     return vec4f(rgb * a, a * a);
+    $$ endif
 
     // Note that the final opacity is not necessarily one. This means that
     // the framebuffer can be blended with the background, or one can render

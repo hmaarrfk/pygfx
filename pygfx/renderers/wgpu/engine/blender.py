@@ -46,15 +46,19 @@ default_targets = {
     # change that in a self-contained commit, because it will affect memory usage,
     # and needs a feature?
     #
-    # Using 'rgba8unorm_srgb' means that in each post-effect step, the colors are
-    # stored in srgb, and auto-conveted to linear when read/written. This seems a
-    # bit weird, because from the pov of math that works on linear values, it loses
-    # precision in a non-linear way. But that way we lose precision "in a way that's
-    # linear to the human eye", which results in a better end-result than using
-    # 'rgba8unorm'. Also see https://github.com/pmndrs/postprocessing
+    # This used to be 'rgba8unorm_srgb', so that each post-effect step stored
+    # colors in srgb and the driver converted on read/write. That loses
+    # precision "in a way that's linear to the human eye", which is nicer than
+    # plain 8-bit linear. See https://github.com/pmndrs/postprocessing
+    #
+    # We can't use it any more: llvmpipe's linear-to-srgb conversion is built on
+    # rsqrtps, whose low bits x86 leaves implementation defined, so it gives
+    # different results on Intel and AMD and made the offscreen screenshot tests
+    # flaky. See WgpuRenderer for the details. Using a plain format means the
+    # driver never performs that conversion.
     #
     # This is 4 bytes per pixel.
-    # TODO: use half-floats
+    # TODO: use half-floats, which would get the precision back and then some
     "color": (
         wgpu.TextureFormat.rgba8unorm_srgb,
         usg.RENDER_ATTACHMENT | usg.COPY_SRC | usg.TEXTURE_BINDING,
@@ -100,12 +104,20 @@ class Blender:
     Each renderer has one blender object.
     """
 
-    def __init__(self, *, enable_pick=True, enable_depth=True):
+    def __init__(self, *, enable_pick=True, enable_depth=True, srgb_textures=True):
         self.device = get_shared().device
 
         # We could allow custom targets, but this is not yet implemented in the methods.
         # The code in this init shows the first steps of what that could look like.
         custom_targets = {}  # name -> (format, usage)  could allow users to specify this
+
+        if not srgb_textures:
+            # Keep the driver's linear-to-srgb conversion out of the
+            # intermediates too; see srgb_encode_is_unreliable() in renderer.py.
+            # Only happens on software adapters.
+            for name in ("color", "altcolor"):
+                format, usage = default_targets[name]
+                custom_targets[name] = (format.replace("-srgb", ""), usage)
 
         # The size (2D in pixels) of the textures.
         self.size = (0, 0)

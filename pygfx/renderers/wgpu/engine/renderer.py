@@ -200,6 +200,33 @@ class FlatScene:
             yield (current_pass_type, current_pipeline_containers)
 
 
+def srgb_encode_is_unreliable(adapter):
+    """Whether this adapter's fixed-function linear-to-srgb conversion can be
+    trusted to give the same answer on every machine.
+
+    It can, on real hardware: the conversion happens in the ROP and is exact.
+    It cannot on llvmpipe, whose version is a polynomial built on rsqrtps, the
+    ~12 bit approximate reciprocal square root whose low bits the x86 ISA
+    leaves implementation defined. Intel and AMD return different bits for it,
+    so the same scene renders to a different 8-bit image on the two vendors.
+    Measured on GitHub Actions runners:
+
+        AMD    rsqrtps(3.0, 7.0, 0.1, 1234.5) = 3f13c800 3ec18000 404a6800 3ce92800
+        Intel  rsqrtps(3.0, 7.0, 0.1, 1234.5) = 3f13c800 3ec18000 404a6000 3ce92800
+
+    In mesa, pinned at 8e12d6000b247715b7c9bfaac67bca565dd8b9d8:
+      src/gallium/auxiliary/gallivm/lp_bld_format_srgb.c:244-292
+        (lp_build_linear_to_srgb; mesa's own comment there reads "the constants
+         are magic values. They were found empirically ... This function has an
+         error of max +-0.17. Not sure this is actually enough")
+      src/gallium/auxiliary/gallivm/lp_bld_arit.c:2616-2639
+        (lp_build_fast_rsqrt -> llvm.x86.sse.rsqrt.ps)
+
+    Only affects software rendering, which in practice means CI.
+    """
+    return adapter.info.get("adapter_type", "").lower() == "cpu"
+
+
 class WgpuRenderer(RootEventHandler, Renderer):
     """Turns Scenes into rasterized images using wgpu.
 
@@ -282,16 +309,42 @@ class WgpuRenderer(RootEventHandler, Renderer):
 
         # Get target format
         self.gamma_correction = gamma_correction
-        self._gamma_correction_srgb = 1.0
+        # Whether we keep the driver's linear-to-srgb conversion out of the
+        # pipeline entirely. Drives the intermediate formats, the output pass,
+        # and how the colour texture is read back.
+        self._avoid_driver_srgb = srgb_encode_is_unreliable(self._shared.adapter)
+        self._srgb_encode_in_shader = False
+        self._srgb8_from_linear8 = None  # lazily built lookup, see snapshot()
         if isinstance(target, BaseRenderCanvas):
             self._canvas_context = self._target.get_context("wgpu")
-            # Select output format. We currently don't have a way of knowing
-            # what formats are available, so if not srgb, we gamma-correct in shader.
             target_format = self._canvas_context.get_preferred_format(
                 self._shared.adapter
             )
-            if not target_format.endswith("srgb"):
-                self._gamma_correction_srgb = 1 / 2.2  # poor man's srgb
+            # On a software adapter, ask for the plain (non-srgb) variant and
+            # do the linear-to-srgb encode ourselves in the output pass. On real
+            # hardware the driver does that conversion exactly, in the ROP, so
+            # we leave it alone and nothing here changes for those users.
+            #
+            # Llvmpipe's fixed-function version of that conversion is built on
+            # rsqrtps, the ~12 bit approximate reciprocal square root whose low
+            # bits the x86 ISA leaves implementation defined. Intel and AMD
+            # return different bits for it, so the same scene rendered to an
+            # srgb target produces a different 8-bit image on the two vendors --
+            # about 2% of values land on the other side of a rounding boundary,
+            # which is what made the offscreen screenshot tests flaky.
+            #
+            # In mesa, pinned at 8e12d6000b247715b7c9bfaac67bca565dd8b9d8:
+            #   src/gallium/auxiliary/gallivm/lp_bld_format_srgb.c:244-292
+            #     (lp_build_linear_to_srgb; mesa's own comment there reads
+            #      "the constants are magic values. They were found empirically
+            #      ... This function has an error of max +-0.17. Not sure this
+            #      is actually enough")
+            #   src/gallium/auxiliary/gallivm/lp_bld_arit.c:2616-2639
+            #     (lp_build_fast_rsqrt -> llvm.x86.sse.rsqrt.ps)
+            if self._avoid_driver_srgb:
+                if target_format.endswith("-srgb"):
+                    target_format = target_format[: -len("-srgb")]
+                self._srgb_encode_in_shader = True
             # Also configure the canvas
             self._canvas_context.configure(
                 device=self._device,
@@ -302,7 +355,7 @@ class WgpuRenderer(RootEventHandler, Renderer):
             self._target._wgpu_usage |= wgpu.TextureUsage.RENDER_ATTACHMENT
             self._target._wgpu_usage |= wgpu.TextureUsage.TEXTURE_BINDING
 
-        self._blender = Blender()
+        self._blender = Blender(srgb_textures=not self._avoid_driver_srgb)
         self._effect_passes = ()
         self.ppaa = ppaa
         self._name_of_texture_with_effects = (
@@ -312,7 +365,7 @@ class WgpuRenderer(RootEventHandler, Renderer):
         self.sort_objects = sort_objects
 
         # Prepare object that performs the final render step into a texture
-        self._output_pass = OutputPass()
+        self._output_pass = OutputPass(srgb_encode=self._srgb_encode_in_shader)
         self.pixel_filter = pixel_filter
 
         # Initialize a small buffer to read pixel info into
@@ -843,7 +896,7 @@ class WgpuRenderer(RootEventHandler, Renderer):
 
         # Apply copy-pass
         color_tex = self._blender.get_texture_view(src_name, src_usage)
-        self._output_pass.gamma = self._gamma_correction * self._gamma_correction_srgb
+        self._output_pass.gamma = self._gamma_correction
         # self._output_pass.filter_strength = self._pixel_filter
         self._output_pass.render(command_encoder, color_tex, None, target_tex)
 
@@ -984,7 +1037,15 @@ class WgpuRenderer(RootEventHandler, Renderer):
             data = self._pixel_info_buffer.read_mapped()
         finally:
             self._pixel_info_buffer.unmap()
-        color = Color(x / 255 for x in tuple(data[0:4].cast("B")))
+        raw = tuple(data[0:4].cast("B"))
+        if self._avoid_driver_srgb:
+            # The colour texture holds physical (linear) values in this case;
+            # this has always reported srgb, so convert. Same lookup as
+            # snapshot().
+            lut = self._get_srgb8_from_linear8()
+            color = Color(*(lut[v] / 255 for v in raw[:3]), raw[3] / 255)
+        else:
+            color = Color(v / 255 for v in raw)
         pick_value = tuple(data[8:16].cast("Q"))[0]  # noqa: RUF015
         wobject_id = pick_value & 1048575  # 2**20-1
         wobject = id_provider.get_object_from_id(wobject_id)
@@ -1053,7 +1114,26 @@ class WgpuRenderer(RootEventHandler, Renderer):
             size,
         )
 
-        return np.frombuffer(data, dtype).reshape(size[1], size[0], 4)
+        im = np.frombuffer(data, dtype).reshape(size[1], size[0], 4)
+        if dtype is np.uint8 and self._avoid_driver_srgb:
+            # The colour texture is a plain (non-srgb) format now, so it holds
+            # physical (linear) values. This method has always returned srgb,
+            # and callers pass the result straight to an image library, so
+            # convert.
+            im = im.copy()
+            im[..., :3] = self._get_srgb8_from_linear8()[im[..., :3]]
+        return im
+
+    def _get_srgb8_from_linear8(self):
+        """A 256-entry linear-to-srgb lookup, for reading back the colour
+        texture. Exact by construction, and built once."""
+        if self._srgb8_from_linear8 is None:
+            lin = np.arange(256, dtype=np.float64) / 255
+            srgb = np.where(
+                lin <= 0.0031308, lin * 12.92, 1.055 * lin ** (1 / 2.4) - 0.055
+            )
+            self._srgb8_from_linear8 = np.round(srgb * 255).astype(np.uint8)
+        return self._srgb8_from_linear8
 
     def request_draw(self, draw_function=None):
         """Forwards a request_draw call to the target canvas. If the renderer's
