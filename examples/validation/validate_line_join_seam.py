@@ -41,18 +41,49 @@ from rendercanvas.auto import RenderCanvas, loop
 import pygfx as gfx
 
 
-canvas = RenderCanvas(size=(1000, 500))
+THICKNESS = 14.0
+# The dash phase at the corner is LEG_LENGTH / THICKNESS in dash units, so this
+# puts the corner one unit into a two-unit stroke: a dash sits astride it. The
+# [2, 2] pattern has a period of 4 and 126 / 14 = 9 = 2 * 4 + 1, so any leg length
+# of THICKNESS * (4k + 1) keeps that same phase -- handy if you want longer legs.
+LEG_LENGTH = 126.0
+ANGLES = [90, 70, 60, 45, 30, 15, 10, 5]
+
+# Two legs meeting at `angle` end up 2 * LEG_LENGTH * sin(angle / 2) apart, which
+# for the sharpest corners here is less than the line is wide: 22 units at 10
+# degrees and 11 at 5, against a stroke of 14. So below about 10 degrees the two
+# legs genuinely lie on top of each other near the apex, and the bright patch you
+# see there is the stroke overlapping *itself* -- a hairpin -- not the join being
+# drawn twice. That is a different defect, it is not what the bisector cut
+# addresses, and no amount of leg length removes it: the legs of a 5 degree corner
+# need 160 units before they clear each other, which is the whole neighbourhood of
+# the join. The corners from 15 degrees up are the ones that test the join.
+DASHED_Y, SOLID_Y, LABEL_Y = 30.0, -220.0, -265.0
+GAP = 50.0
+
+# A sharp corner is much narrower than a blunt one, so the columns are packed by
+# their actual width; at a fixed pitch the sharp end of the row would be mostly
+# empty. The camera is then framed on what the rows actually occupy, so that the
+# joins -- the point of the example -- are as large as they can be.
+widths = [2 * LEG_LENGTH * np.sin(np.radians(a / 2)) for a in ANGLES]
+span = sum(widths) + GAP * (len(ANGLES) - 1)
+edge = -span / 2
+centers = []
+for width in widths:
+    centers.append(edge + width / 2)
+    edge += width + GAP
+
+top = DASHED_Y + LEG_LENGTH
+bottom = LABEL_Y - 40
+view_width = span + 100
+view_height = (top - bottom) + 60
+
+canvas = RenderCanvas(size=(1600, round(1600 * view_height / view_width)))
 renderer = gfx.WgpuRenderer(canvas)
 renderer.ppaa = "none"  # the seam is the shader's own, not the AA pass's
 
 scene = gfx.Scene()
 scene.add(gfx.Background.from_color("#000"))
-
-THICKNESS = 14.0
-# The dash phase at the corner is leg_length / THICKNESS, in dash units, so this
-# puts the corner one unit into a two-unit stroke: a dash sits astride it.
-LEG_LENGTH = 70.0
-ANGLES = [90, 70, 60, 45, 30]
 
 
 def corner(angle_deg, cx, cy):
@@ -64,11 +95,10 @@ def corner(angle_deg, cx, cy):
     )
 
 
-for i, angle in enumerate(ANGLES):
-    x = -380 + i * 190
+for angle, x in zip(ANGLES, centers, strict=True):
     for dashed, y, color in (
-        (True, 40, (1.0, 0.85, 0.33, 0.4)),
-        (False, -190, (0.47, 0.68, 1.0, 0.4)),
+        (True, DASHED_Y, (1.0, 0.85, 0.33, 0.4)),
+        (False, SOLID_Y, (0.47, 0.68, 1.0, 0.4)),
     ):
         scene.add(
             gfx.Line(
@@ -88,10 +118,11 @@ for i, angle in enumerate(ANGLES):
         anchor="middle-center",
         material=gfx.TextMaterial(color="#888"),
     )
-    label.local.position = (x, -60, 0)
+    label.local.position = (x, LABEL_Y, 0)
     scene.add(label)
 
-camera = gfx.OrthographicCamera(1000, 500)
+camera = gfx.OrthographicCamera(view_width, view_height)
+camera.local.position = (0, (top + bottom) / 2, 0)
 controller = gfx.PanZoomController(camera, register_events=renderer)
 
 canvas.request_draw(lambda: renderer.render(scene, camera))
