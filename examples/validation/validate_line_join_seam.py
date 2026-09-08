@@ -8,16 +8,20 @@ Line join seam
 
 Every pixel of a uniformly translucent line over a flat background must
 composite to the same value, so a corner is right here only if it is one flat
-colour. The dashed row used to fail that from 70 degrees down: a darker
-hairline was drawn across the inside of each corner.
+colour. The dashed row used to fail that from 70 degrees down, in two different
+ways depending on the alpha mode: a darker hairline drawn across the inside of
+each corner, or -- with `alpha_mode="blend"` -- a brighter patch there instead.
 
-A line overlaps itself wherever a join is "broken" -- a corner too sharp to be
-mitred, which the shader covers with the two segments' own caps instead. Those
-faces are coplanar, so only one of them survives the depth test, and where the
-survivor carried a partial antialiasing alpha its sibling's solid coverage was
-thrown away. That was the seam. The shader now hands every face that reaches
-into the overlap the *union* of the two capsules to measure, so the faces agree
-about the coverage there and it stops mattering which one survives.
+A line used to overlap itself wherever a join is "broken" -- a corner too sharp
+to be mitred, which the shader covers with the two segments' own caps instead.
+Those faces are coplanar and nothing can arbitrate between them properly. With
+a depth test one is dropped, and if the survivor carried a partial antialiasing
+alpha its sibling's solid coverage went with it: that was the dark hairline.
+With none, both composite and the overlap is painted twice: that was the bright
+patch. The shader now divides the corner at the plane that bisects it, so each
+face keeps only its own side and the overlap is not drawn at all. The pixel is
+inked once, so neither failure has anywhere to happen and the result no longer
+depends on the alpha mode.
 
 Dashing is what makes these corners broken joins at all: the shader mitres up to
 `max_vec_mag`, which is 100 when solid but drops to 1.5 (about 90 degrees) when

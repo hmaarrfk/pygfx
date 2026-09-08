@@ -87,27 +87,50 @@ fn is_finite(v:f32) -> bool {
     return !is_nan(v) && !is_inf(v);
 }
 
-// The distance from a fragment to the axis of the capsule that the neighbouring
-// segment draws, used to unite the two capsules at a broken join (see the fragment
-// shader). Everything is expressed in this face's own segment frame: `along` and
-// `across` are the fragment's position in it, and `dir` is the neighbour's direction
-// away from the shared node, scaled by the ramp between the two ends of the face
-// (which is how the far end of a segment can carry a neighbour it does not itself
-// know about). `len_ramped` is the neighbour's length, carrying the same ramp.
-// A negative result means there is no neighbour here.
-fn dist_to_neighbour_axis(dir_ramped: vec2<f32>, along: f32, len_ramped: f32, across: f32) -> f32 {
-    let ramp = length(dir_ramped);
+// Everything a face needs to know about the segment on the other side of a broken
+// join, evaluated at one fragment. See the fragment shader for what it is for.
+//
+// `cut_ramped` is the unit normal of the plane that divides the corner between the
+// two segments -- the bisector of their directions of travel -- expressed in this
+// face's own segment frame and scaled by the ramp from one end of the face to the
+// other. Its length is therefore that ramp, and dividing by it recovers the normal.
+// That is what lets the far end of a segment carry a corner it does not itself know
+// about: it only has to write a zero. `len_ramped` is the neighbour's length,
+// carrying the same ramp. `along` and `across` place the fragment in this face's own
+// segment frame, with the shared node at the origin. `flip` is +1 at the end served
+// by vertices 1-3 and -1 at the end served by vertices 4-6.
+//
+// Returns all zeros when this end is not a broken join. Otherwise:
+//   .x  1, i.e. "there is a neighbour here"
+//   .y  the distance to the neighbour's capsule axis
+//   .z  the fragment's signed distance to the cut plane, positive towards the
+//       neighbour's side of it
+fn neighbour_across_broken_join(cut_ramped: vec2<f32>, len_ramped: f32, along: f32, across: f32, flip: f32, half_thickness: f32) -> vec3<f32> {
+    let ramp = length(cut_ramped);
     if (ramp <= 0.001) {
-        return -1.0;
+        return vec3<f32>(0.0, 0.0, 0.0);
     }
-    let dir = dir_ramped / ramp;
+    let cut = cut_ramped / ramp;
+    // The cut bisects the corner, so the neighbour's direction (away from the shared
+    // node) sits at twice the cut's angle from this face's own. Getting there by the
+    // double-angle identities rather than by carrying a second vector keeps the two
+    // exactly consistent, which matters because they are used against each other.
+    let dir = flip * vec2<f32>(2.0 * cut.x * cut.x - 1.0, 2.0 * cut.x * cut.y);
     // Position in the neighbour's frame, and its distance to the neighbour's axis.
     // The axis is a segment, not a line, so it rounds off at both ends -- at the
     // shared node that roundness is the neighbour's own cap.
     let nb_along = along * dir.x + across * dir.y;
     let nb_across = across * dir.x - along * dir.y;
-    let nb_beyond = nb_along - clamp(nb_along, 0.0, len_ramped / ramp);
-    return length(vec2<f32>(nb_beyond, nb_across));
+    let nb_len = len_ramped / ramp;
+    let nb_beyond = nb_along - clamp(nb_along, 0.0, nb_len);
+    let dist_to_axis = length(vec2<f32>(nb_beyond, nb_across));
+    // The cut may only be applied where the neighbour actually reaches: outside its
+    // capsule there is nothing over there to take the fragment over, and cutting
+    // would punch a hole. That happens for real -- a hairpin whose two legs are of
+    // very different lengths runs past the end of the short one. The stand-in has to
+    // be negative, because that is the "keep it" side at both ends.
+    let cut_dist = select(-1.0, flip * (along * cut.x + across * cut.y), dist_to_axis <= half_thickness);
+    return vec3<f32>(1.0, dist_to_axis, cut_dist);
 }
 
 fn rotate_vec2(v:vec2<f32>, angle:f32) -> vec2<f32> {
@@ -420,15 +443,14 @@ fn vs_main(in: VertexInput) -> Varyings {
     // In joins, this is 1.0 for the vertices in the outer corner.
     var is_outer_corner = 0.0;
 
-    // The direction of the neighbouring segment, expressed in this vertex's own
-    // segment frame, for the two ends of the face that this vertex takes part in.
-    // Only set at a broken join, where the two segments overlap each other; see the
-    // union-of-capsules logic in the fragment shader. The 'a' end is the one served
-    // by vertices 4-6, the 'b' end the one served by vertices 1-3. A zero vector
-    // means "no neighbour to unite with", and because the vector has unit length
-    // where it is set, its interpolated length is the ramp between the two ends.
-    var nb_dir_a = vec2<f32>(0.0, 0.0);
-    var nb_dir_b = vec2<f32>(0.0, 0.0);
+    // The normal of the plane that divides a broken join between its two segments,
+    // expressed in this vertex's own segment frame, for the two ends of the face that
+    // this vertex takes part in. The 'a' end is the one served by vertices 4-6, the
+    // 'b' end the one served by vertices 1-3. A zero vector means "not a broken join
+    // at this end", and because the vector has unit length where it is set, its
+    // interpolated length is the ramp between the two ends of a face.
+    var nb_cut_a = vec2<f32>(0.0, 0.0);
+    var nb_cut_b = vec2<f32>(0.0, 0.0);
 
     // The vertex inset, in coord-coords. Is set for joins to keep the segments rectangular.
     // The value will depend on the angle between the segments, and the line thickness.
@@ -648,14 +670,15 @@ fn vs_main(in: VertexInput) -> Varyings {
         if (!join_is_contiguous) {
             // Create a broken join: render as separate segments with caps.
 
-            // The two segments overlap around this node: the faces on either side
-            // cover some of the same pixels, and being coplanar they cannot both
-            // composite. Hand every face that reaches into the overlap the direction
-            // of the *other* segment, so that it can evaluate the union of the two
-            // capsules and agree with its sibling on the coverage there.
-            // The direction points away from the node, into the neighbour.
-            nb_dir_b = vec2<f32>(cos(angle), sin(angle));
-            nb_dir_a = vec2<f32>(-cos(angle), sin(angle));
+            // The two segments overlap around this node. Hand every face that
+            // reaches into the overlap the plane that divides the corner between
+            // them -- the bisector of the two directions of travel -- so that the
+            // faces can tile the corner instead of covering it twice. Expressed in
+            // each face's own segment frame that is a rotation by half the turn
+            // angle; both are the same plane in the end, which is what makes the two
+            // sides fit together exactly.
+            nb_cut_b = vec2<f32>(cos(0.5 * angle), sin(0.5 * angle));
+            nb_cut_a = vec2<f32>(cos(0.5 * angle), -sin(0.5 * angle));
 
             let miter_length = 4.0;
 
@@ -801,7 +824,7 @@ $$ if line_type == 'line'
     // two ends, and the direction being a unit vector is what makes that ramp
     // recoverable in the fragment shader.
     let nb_here = select(0.0, 1.0, vertex_num >= 4);
-    varyings.nb_dirs = vec4<f32>(vec4<f32>(nb_dir_a * nb_here, nb_dir_b * (1.0 - nb_here)) * w);
+    varyings.nb_cuts = vec4<f32>(vec4<f32>(nb_cut_a * nb_here, nb_cut_b * (1.0 - nb_here)) * w);
     // The neighbour's length, so that the union stops where the neighbour does.
     varyings.nb_lens_pw = vec2<f32>(
         vec2<f32>(length(vec_s_prev) * nb_here, length(vec_s_next) * (1.0 - nb_here)) * l2p * w
@@ -938,35 +961,47 @@ fn fs_main(varyings: Varyings, @builtin(front_facing) is_front: bool) -> Fragmen
     var dist_to_stroke_p = length(segment_coord_p) - half_thickness_p;
 
 $$ if line_type == 'line'
-    // Unite with the neighbouring capsule at a broken join.
+    // Tile a broken join, instead of covering it twice.
     //
     // A broken join is a corner too sharp to mitre, so the two segments keep their
-    // full width right up to the node and overlap each other there. The faces that
-    // cover the overlap are coplanar: the depth test lets exactly one of them
-    // through, and where the survivor happens to be an antialiased edge lying inside
-    // its sibling's solid interior, the pixel keeps a partial alpha and a hairline is
-    // drawn across the corner. Making both faces composite is not the answer -- the
-    // overlap then gets painted twice -- so instead every face in the overlap is
-    // given the *union* of the two capsules to measure. Its edge is then no longer an
-    // edge, because it lies inside the union, and all the candidates for the pixel
-    // agree on the coverage. Which one the depth test keeps stops mattering.
+    // full width right up to the node and overlap each other around it. The faces
+    // that cover the overlap are coplanar and there is nothing to arbitrate between
+    // them: with a depth test one is dropped, and if the survivor is an antialiased
+    // edge lying inside its sibling's solid interior the pixel keeps a partial alpha
+    // and a dark hairline is drawn across the corner; with none, both composite and
+    // the overlap is painted twice, which is the brighter and more obvious failure.
     //
-    // The neighbour is described by its direction in this face's own segment frame,
-    // pointing away from the shared node. It is set only at the ends of the face that
-    // are a broken join, and it is a unit vector there, so the length of the
-    // interpolated value is the ramp from one end of the face to the other and
-    // dividing by it recovers the direction. This is what lets the far end of a
-    // segment carry a neighbour it does not itself know about.
-    // A negative result means "no neighbour at this end", and then nothing below
-    // touches dist_to_stroke_p at all.
-    let nb_dirs = varyings.nb_dirs / varyings.w;
+    // So the overlap is divided rather than measured. Each face keeps only its own
+    // side of the plane that bisects the corner, and the two sides fit together
+    // exactly because it is the same plane. Nothing is drawn twice, and nothing is
+    // dropped, so neither failure has anywhere to happen.
+    //
+    // Dividing alone would leave the seam, though, because the face that keeps a
+    // pixel may be the one whose own edge runs through it. So each face also
+    // measures the *union* of the two capsules rather than only its own: its edge
+    // stops being an edge where it lies inside the other one, and the coverage it
+    // computes is the coverage of the corner as a whole. The two work together --
+    // the division decides who draws, the union decides what they draw -- and the
+    // union also covers for the division where a segment is too short to take over
+    // the pixels the division would hand it.
     let nb_pos = varyings.nb_pos_pw / varyings.w;
     let nb_lens = varyings.nb_lens_pw / varyings.w;
-    let dist_to_nb_a_p = dist_to_neighbour_axis(nb_dirs.xy, nb_pos.x, nb_lens.x, segment_coord_p.y);
-    let dist_to_nb_b_p = dist_to_neighbour_axis(nb_dirs.zw, nb_pos.y, nb_lens.y, segment_coord_p.y);
-    var dist_to_nb_axis_p = max(dist_to_nb_a_p, dist_to_nb_b_p);
-    if (dist_to_nb_a_p >= 0.0 && dist_to_nb_b_p >= 0.0) {
-        dist_to_nb_axis_p = min(dist_to_nb_a_p, dist_to_nb_b_p);
+    let nb_cuts = varyings.nb_cuts / varyings.w;
+    let nb_a = neighbour_across_broken_join(nb_cuts.xy, nb_lens.x, nb_pos.x, segment_coord_p.y, -1.0, half_thickness_p);
+    let nb_b = neighbour_across_broken_join(nb_cuts.zw, nb_lens.y, nb_pos.y, segment_coord_p.y, 1.0, half_thickness_p);
+    // Each end keeps its own side of its cut. The two comparisons are complementary,
+    // so that a fragment exactly on a cut goes to one side and not to both.
+    // Not in debug mode: that draws the triangles themselves, and the point of it is
+    // to see the geometry as it is emitted rather than as the corner divides it.
+    $$ if not debug
+    if (nb_a.x > 0.0 && nb_a.z > 0.0) { discard; }
+    if (nb_b.x > 0.0 && nb_b.z >= 0.0) { discard; }
+    $$ endif
+    // Unite with whichever neighbours this face has.
+    var dist_to_nb_axis_p = -1.0;
+    if (nb_a.x > 0.0) { dist_to_nb_axis_p = nb_a.y; }
+    if (nb_b.x > 0.0) {
+        dist_to_nb_axis_p = select(nb_b.y, min(dist_to_nb_axis_p, nb_b.y), dist_to_nb_axis_p >= 0.0);
     }
     if (dist_to_nb_axis_p >= 0.0) {
         dist_to_stroke_p = min(dist_to_stroke_p, dist_to_nb_axis_p - half_thickness_p);
