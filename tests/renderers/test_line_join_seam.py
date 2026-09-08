@@ -1,17 +1,17 @@
 """
-Characterise the seam a line draws across a broken join.
+A line must not draw a seam across a broken join.
 
 A line overlaps itself wherever a join is "broken" -- a corner too sharp to be
 mitred, which the shader covers with the two segments' own caps instead. The
-two faces are coplanar and disagree about coverage in the overlap, and the
-depth test arbitrates between them. Under the default ``depth_compare="<"``
-only the first fragment survives, so where it sits on an antialiased edge that
-its sibling covers solidly, the pixel keeps a partial alpha: a dark hairline is
-drawn across the inside of the corner.
+two faces are coplanar, and where they disagree about coverage the depth test
+arbitrates between them. Under the default ``depth_compare="<"`` only the first
+fragment survives, so where it sits on an antialiased edge that its sibling
+covers solidly, the pixel keeps a partial alpha: that used to draw a dark
+hairline across the inside of the corner.
 
-These tests describe the defect rather than fix it. The requirement below is
-marked xfail, strictly, so that whoever does fix it is told by a failing
-XPASS rather than having to notice this file.
+The shader now hands every face that reaches into the overlap the *union* of
+the two capsules to measure, so the faces agree there and it stops mattering
+which one the depth test keeps. These tests hold it to that.
 
 The measurement uses a *translucent* line, which is much the better probe:
 
@@ -124,14 +124,13 @@ def interior_range(image):
     return int(image[interior].min()), int(image[interior].max())
 
 
-@pytest.mark.xfail(strict=True, reason="the broken-join seam is not fixed yet")
 @pytest.mark.parametrize("angle", [70, 60, 45, 30])
 def test_no_seam_across_a_broken_join(angle):
     """A uniformly translucent line must render to one uniform value.
 
-    This is the requirement. It currently fails with the interior spanning
-    roughly 70..170 instead of a single value: a one-pixel dark line drawn
-    across the inside of the corner.
+    This is the requirement. Before the union-of-capsules fix the interior
+    spanned roughly 70..170 instead of a single value: a one-pixel dark line
+    drawn across the inside of the corner.
     """
     low, high = interior_range(render_corner(angle))
     assert high - low <= TOLERANCE, (
@@ -146,9 +145,13 @@ def test_a_mitred_join_is_clean(angle):
     This is the control. It shows the defect belongs to the broken join and not
     to sharp corners as such, and it guards the measurement: if this ever fails,
     the harness is wrong rather than the shader.
-    Thirty degrees and sharper is excluded: a solid corner that sharp has a
-    small defect of its own (a spread of about 18), which `depth_compare` does
-    not affect either way and which is not understood.
+    Thirty degrees and sharper is excluded, for a reason that has nothing to do
+    with the join: at those angles the two legs of the test's V meet each other
+    a long way from the node, and the concave corner where their inner edges
+    cross is a pixel or two too dark (a spread of about 18 at 30 degrees). That
+    is the ordinary antialiasing error at a concave corner -- coverage is taken
+    from the distance to the nearer of the two edges, which underestimates it --
+    and it happens the same way whether the join is mitred or broken.
     """
     low, high = interior_range(render_corner(angle, dashed=False))
     assert high - low <= TOLERANCE, f"{angle} degrees: {low}..{high}"
@@ -163,23 +166,28 @@ def test_depth_compare_le_is_not_the_fix():
     seam comes back as a bright patch. On an opaque line that is invisible,
     which is exactly why the opaque metric must not be trusted here.
 
-    Kept as a passing test so the candidate is not re-proposed.
+    Kept as a passing test so the candidate is not re-proposed. The fix that
+    did land leaves both faces drawing but makes them agree, so the overlap is
+    still there for ``"<="`` to paint twice: this reads 170..210 where the
+    default reads a flat 170.
     """
     plain_low, plain_high = interior_range(render_corner(60))
+    assert plain_high - plain_low <= TOLERANCE, "the corner should be uniform"
     low, high = interior_range(render_corner(60, depth_compare="<="))
-    assert low > plain_low + 3 * TOLERANCE, "the dark seam should be gone"
     assert high > plain_high + 3 * TOLERANCE, (
         f"expected a bright patch from double compositing, got {low}..{high}"
     )
 
 
 @pytest.mark.parametrize("pixel_ratio", [1, 2, 4])
-def test_the_defect_is_visible_at_every_pixel_ratio(pixel_ratio):
+def test_the_corner_is_uniform_at_every_pixel_ratio(pixel_ratio):
     """Why this file measures a translucent line and not an opaque one.
 
-    The opaque seam is a resampling coincidence: it is invisible at pixel ratio
-    1 and only reaches 224/255 at 2. The translucent one is there at all of
-    them, so a test built on it cannot pass by accident.
+    The opaque seam was a resampling coincidence: invisible at pixel ratio 1,
+    224/255 at 2, 241/255 at 4. So a fix judged on an opaque line can pass by
+    accident at one ratio and fail at another. The translucent measurement is
+    the same at all of them, and this pins that down: a fix that only lines up
+    the samples at one ratio does not pass here.
     """
     low, high = interior_range(render_corner(60, pixel_ratio=pixel_ratio))
-    assert high - low > 3 * TOLERANCE, f"pixel ratio {pixel_ratio}: {low}..{high}"
+    assert high - low <= TOLERANCE, f"pixel ratio {pixel_ratio}: {low}..{high}"

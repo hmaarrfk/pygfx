@@ -4,23 +4,26 @@ Line join seam
 
 * A row of increasingly sharp corners, dashed on top and solid below.
 * The dash phase is chosen so that a dash straddles each corner.
-* The lines are translucent, which is what makes the defect plain.
+* The lines are translucent, which is what makes any seam plain.
 
-**This example currently renders incorrectly**, on purpose: it is the picture of
-an open bug. Every pixel of a uniformly translucent line over a flat background
-must composite to the same value, and on the dashed row the inside of each
-corner from 70 degrees down is crossed by a darker hairline.
+Every pixel of a uniformly translucent line over a flat background must
+composite to the same value, so a corner is right here only if it is one flat
+colour. The dashed row used to fail that from 70 degrees down: a darker
+hairline was drawn across the inside of each corner.
 
 A line overlaps itself wherever a join is "broken" -- a corner too sharp to be
 mitred, which the shader covers with the two segments' own caps instead. Those
-faces are coplanar and disagree about coverage where they overlap, so the depth
-test arbitrates, and the fragment that wins may be the one carrying a partial
-antialiasing alpha. That is the seam.
+faces are coplanar, so only one of them survives the depth test, and where the
+survivor carried a partial antialiasing alpha its sibling's solid coverage was
+thrown away. That was the seam. The shader now hands every face that reaches
+into the overlap the *union* of the two capsules to measure, so the faces agree
+about the coverage there and it stops mattering which one survives.
 
 Dashing is what makes these corners broken joins at all: the shader mitres up to
 `max_vec_mag`, which is 100 when solid but drops to 1.5 (about 90 degrees) when
-dashing. Hence the solid row below is clean at the same angles -- it is the
-control, not a second example of the bug.
+dashing. Hence the solid row below was clean at the same angles all along -- it
+is the control, not a second example of the bug. A solid line breaks its joins
+too, but only at corners sharp enough that the mitre would run past the segment.
 
 The corners are drawn separately rather than as one polygon so that each gets
 the same dash phase, which is what makes the row comparable.
