@@ -330,6 +330,9 @@ def test_acute_corners_are_not_drawn_twice_when_dashed(alpha_mode):
     assert n == 0, f"{n} pixels of the dashed zigzag are drawn more than once"
 
 
+SHORT_SEGMENT = [(-100, 5), (0, 5), (0, 0), (200, -5)]
+
+
 @pytest.mark.xfail(strict=True, reason="not reachable from one node and its neighbours")
 def test_a_segment_shorter_than_the_line_is_thick():
     """The one local case that is still drawn twice, recorded so it is not lost.
@@ -345,8 +348,153 @@ def test_a_segment_shorter_than_the_line_is_thick():
 
     This is the geometry straight out of examples/feature_demo/line_basic.py.
     """
-    image = render_polyline(
-        [(-100, 5), (0, 5), (0, 0), (200, -5)], thickness=THICK, size=400
-    )
+    image = render_polyline(SHORT_SEGMENT, thickness=THICK, size=400)
     once, n = overdrawn(image)
     assert n == 0, f"{n} pixels drawn more than once ({once})"
+
+
+# --- material.min_node_distance, which trades that case for a geometric error ---
+
+
+def render_polyline_skipping(points, min_node_distance, *, alpha_mode=None, size=400):
+    positions = np.array(
+        [[x, y, float(i)] for i, (x, y) in enumerate(points)], np.float32
+    )
+    target = gfx.Texture(
+        dim=2, size=(size, size, 1), format=wgpu.TextureFormat.rgba8unorm
+    )
+    renderer = gfx.WgpuRenderer(target)
+    renderer.ppaa = "none"
+    scene = gfx.Scene()
+    scene.add(gfx.Background.from_color("#000"))
+    scene.add(
+        gfx.Line(
+            gfx.Geometry(positions=positions),
+            gfx.LineMaterial(
+                thickness=THICK,
+                color=(1, 1, 1, ALPHA),
+                aa=True,
+                min_node_distance=min_node_distance,
+                **({} if alpha_mode is None else {"alpha_mode": alpha_mode}),
+            ),
+        )
+    )
+    camera = gfx.OrthographicCamera(size, size)
+    camera.local.position = (
+        float(positions[:, 0].mean()),
+        float(positions[:, 1].mean()),
+        0,
+    )
+    renderer.render(scene, camera)
+    return renderer.snapshot()[..., 0].astype(int)
+
+
+@pytest.mark.parametrize("alpha_mode", ALPHA_MODES)
+def test_min_node_distance_removes_the_short_segment_overdraw(alpha_mode):
+    """Skipping the node is the way out of the case above, at a price.
+
+    The node that cannot be divided is simply not drawn, so there is nothing
+    left to draw twice. What it costs is that the stroke cuts the corner, by up
+    to `min_node_distance`; that is a real change to the shape, which is why it
+    is off by default.
+    """
+    _, before = overdrawn(render_polyline_skipping(SHORT_SEGMENT, 0.0))
+    assert before > 0, "this test is pointless if there is nothing to fix"
+    _, after = overdrawn(
+        render_polyline_skipping(SHORT_SEGMENT, 12.0, alpha_mode=alpha_mode)
+    )
+    assert after == 0, f"{after} pixels still drawn more than once"
+
+
+def test_min_node_distance_is_off_by_default():
+    """Nothing about a line changes unless the material asks for it."""
+    a = render_polyline_skipping(SHORT_SEGMENT, 0.0)
+    b = render_polyline(SHORT_SEGMENT, thickness=THICK, size=400)
+    assert np.array_equal(a, b)
+
+
+@pytest.mark.parametrize("loop", [True, 4])
+def test_min_node_distance_leaves_a_looping_line_alone(loop):
+    """Skipping is not applied to loops, whose bookkeeping is by node index.
+
+    A loop is marked out by first/last/connector node, or (for a fixed size) by
+    plain index arithmetic; taking a node out from under either would corrupt
+    it. So the setting is ignored there, and this says so out loud.
+    """
+    # a square with one corner nudged, so there is a short segment to skip
+    square = np.array(
+        [
+            [-60, -60, 0],
+            [60, -60, 0],
+            [60, 60, 0],
+            [58, 60, 0],
+        ],
+        np.float32,
+    )
+
+    def render(min_node_distance):
+        target = gfx.Texture(
+            dim=2, size=(200, 200, 1), format=wgpu.TextureFormat.rgba8unorm
+        )
+        renderer = gfx.WgpuRenderer(target)
+        renderer.ppaa = "none"
+        scene = gfx.Scene()
+        scene.add(gfx.Background.from_color("#000"))
+        scene.add(
+            gfx.Line(
+                gfx.Geometry(positions=square),
+                gfx.LineMaterial(
+                    thickness=THICK,
+                    color=(1, 1, 1, ALPHA),
+                    aa=True,
+                    loop=loop,
+                    min_node_distance=30.0,
+                ),
+            )
+        )
+        camera = gfx.OrthographicCamera(200, 200)
+        renderer.render(scene, camera)
+        return renderer.snapshot()
+
+    assert np.array_equal(render(0.0), render(30.0)), (
+        f"loop={loop} was affected by min_node_distance"
+    )
+
+
+def test_the_skip_threshold_has_hysteresis():
+    """Otherwise a node parked on the threshold flickers as the camera moves.
+
+    Measured over 200 frames of a zoom wobbling by 2% either side of the
+    threshold: 44 changes of state without hysteresis, none with it. This holds
+    the mechanism rather than the number: a node already skipped stays skipped
+    a little past the point where it would first be drawn again.
+    """
+    from pygfx.renderers.wgpu.shaders.lineshader import LineShader
+
+    line = gfx.Line(
+        gfx.Geometry(
+            positions=np.array([[x, y, 0.0] for x, y in SHORT_SEGMENT], np.float32)
+        ),
+        gfx.LineMaterial(thickness=THICK, min_node_distance=10.0),
+    )
+    shader = LineShader(line)
+    camera = gfx.OrthographicCamera(400, 400)
+
+    def states(hysteresis):
+        shader._skip_hysteresis = hysteresis
+        shader._skip_state = None
+        seen = []
+        # the short segment is 5 units, so it is 10 logical pixels at width 200:
+        # exactly the threshold, which is where a plain comparison flickers
+        for width in (210, 195, 205, 192, 208, 190, 210):
+            camera.width = camera.height = width
+            shader._bake_node_skips(line, camera, (400, 400))
+            seen.append(shader._skip_state.copy())
+        return seen
+
+    plain = states(0.0)
+    sticky = states(0.25)
+    flips = lambda seq: sum(int((b != a).sum()) for a, b in zip(seq, seq[1:]))  # noqa
+    assert flips(plain) > flips(sticky), (
+        f"hysteresis did not settle anything: {flips(plain)} vs {flips(sticky)}"
+    )

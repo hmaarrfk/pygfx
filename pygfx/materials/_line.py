@@ -30,6 +30,9 @@ class LineMaterial(Material):
     loop : bool | int
         Whether the line's end should be connected. Can also be an int to draw a
         series of closed shapes with that many nodes each. Default False.
+    min_node_distance : float
+        Nodes closer to their neighbour than this many logical pixels on screen
+        are skipped. Default 0.0, i.e. every node is drawn.
     aa : bool
         Whether the line is anti-aliased in the shader. Default False.
     kwargs : Any
@@ -56,6 +59,7 @@ class LineMaterial(Material):
         dash_pattern=(),
         dash_offset=0,
         loop=False,
+        min_node_distance=0.0,
         aa=False,
         **kwargs,
     ):
@@ -70,6 +74,7 @@ class LineMaterial(Material):
         self.dash_pattern = dash_pattern
         self.dash_offset = dash_offset
         self.loop = loop
+        self.min_node_distance = min_node_distance
         self.aa = aa
 
     def _wgpu_get_pick_info(self, pick_value):
@@ -277,6 +282,33 @@ class LineMaterial(Material):
             self._store.loop = int(loop) if loop >= 3 else bool(loop)
         else:
             self._store.loop = bool(loop)
+
+    @property
+    def min_node_distance(self) -> float:
+        """Skip nodes that are closer together than this, in logical pixels.
+
+        A corner too sharp to be mitred is drawn as two capped segments, and
+        where the segment is shorter than the line is thick those caps land on
+        each other and on the segment beyond, so the corner is drawn more than
+        once. A translucent line shows that as a bright patch. Setting this
+        skips those nodes instead, which trades the patch for a geometric error:
+        the stroke cuts the corner, by up to this distance.
+
+        That is a real change to the drawn shape, not a rendering detail, which
+        is why it is off by default and why the value is yours to choose. It is
+        measured on screen, so it follows the zoom; the threshold has a little
+        hysteresis so that a node parked on it does not flicker. Values below
+        about a quarter of the thickness are where the artefacts live; much
+        above that and the line visibly loses its shape.
+
+        Not applied to looping lines (``loop``), because a skipped node would
+        have to be taken out of the loop's own bookkeeping as well.
+        """
+        return self._store.min_node_distance
+
+    @min_node_distance.setter
+    def min_node_distance(self, value: float):
+        self._store.min_node_distance = max(0.0, float(value))
 
 
 class LineDebugMaterial(LineMaterial):

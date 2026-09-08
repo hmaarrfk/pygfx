@@ -213,8 +213,21 @@ fn vs_main(in: VertexInput) -> Varyings {
     var face_index = node_index;  // corrected below if necessary, depending on configuration
     let node_index_is_even = node_index % 2 == 0;
 
+$$ if node_skipping
+    // Nodes closer together than the line can draw distinctly are skipped; see
+    // material.min_node_distance. The bake writes, for every node, the node it
+    // stands for (itself, or the next one that is kept) and the last kept node
+    // before it, so the shader can step over the skipped ones. A skipped node
+    // stands for the next kept one, contributes the butt of the segment that
+    // runs past it, and is made degenerate everywhere else.
+    let node_is_skipped = i32(load_s_skip(node_index).x) != node_index;
+    node_index = i32(load_s_skip(node_index).x);
+    var node_index_prev = i32(load_s_skip(max(0, node_index - 1)).x);
+    var node_index_next = i32(load_s_skip(min(u_renderer.last_i, node_index + 1)).y);
+$$ else
     var node_index_prev = max(0, node_index - 1);
     var node_index_next = min(u_renderer.last_i, node_index + 1);
+$$ endif
 
     // The cumulative distance is sampled with its own indices. They match the node
     // indices, except in loops, where the node that closes the loop needs the cumdist
@@ -737,6 +750,21 @@ fn vs_main(in: VertexInput) -> Varyings {
         $$ endif
     }
 
+$$ if node_skipping
+    if (node_is_skipped) {
+        // A skipped node stands for the node before it, and contributes only the
+        // two vertices that end that node's outgoing segment. Giving all six
+        // vertices those two positions leaves exactly one face of this node with
+        // any area -- the body of the segment that runs past it -- and makes
+        // every other face it takes part in degenerate, so they cover no pixels
+        // rather than being drawn and then discarded.
+        coord1 = coord5;
+        coord2 = coord6;
+        coord3 = coord5;
+        coord4 = coord6;
+    }
+$$ endif
+
     // Calculate interpolation ratio.
     // Get ratio in screen space, and then correct for perspective.
     // I derived this step by calculating the new w from the ratio, and then substituting terms.
@@ -764,8 +792,15 @@ fn vs_main(in: VertexInput) -> Varyings {
     // Calculate the relative vertex, in screen coords, from the coord.
     // If the vertex_num is 4, the resulting vertex should be the same as 3, but it might not be
     // due to floating point errors. So we use the coord3-path in that case.
+$$ if node_skipping
+    // A skipped node's vertices are all the node's own vertices 5 and 6, so they
+    // all take the outgoing segment's frame and its offset.
+    let override_use_coord3 = node_is_join && vertex_num == 4 && !node_is_skipped;
+    let use_456 = (vertex_num >= 4 && !override_use_coord3) || node_is_skipped;
+$$ else
     let override_use_coord3 = node_is_join && vertex_num == 4;
     let use_456 = vertex_num >= 4 && !override_use_coord3;
+$$ endif
     let vertex_offset = vec2<f32>(select(-vertex_inset, vertex_inset, use_456), 0.0);
     let ref_coord = select(the_coord, coord3, override_use_coord3);
     let ref_angle = select(angle1, angle3, use_456);
