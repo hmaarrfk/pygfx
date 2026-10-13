@@ -9,6 +9,22 @@ from typing import Any, Tuple, Union
 
 PRECISION_EPSILON = 1e-7
 
+_last_stamp = 0
+
+
+def modification_stamp() -> int:
+    """A value for ``last_modified``: larger than any value returned before.
+
+    The clock alone is not enough. A cached property is recomputed when
+    ``last_modified`` has advanced, so two changes that get the same time lose
+    the second one, and not every clock ticks between two statements: browsers
+    limit the resolution of timers on purpose (to 0.1 ms or 1 ms, where
+    Python runs on Pyodide).
+    """
+    global _last_stamp
+    _last_stamp = max(perf_counter_ns(), _last_stamp + 1)
+    return _last_stamp
+
 
 class cached:  # noqa: N801
     """Cache for computed properties.
@@ -507,7 +523,7 @@ class AffineTransform(AffineBase):
     ) -> None:
         super().__init__(reference_up=reference_up, is_camera_space=is_camera_space)
         self._state_basis = state_basis
-        self.last_modified = perf_counter_ns()
+        self.last_modified = modification_stamp()
 
         self._position = np.asarray(position, dtype=float)
         self._rotation = np.asarray(rotation, dtype=float)
@@ -535,7 +551,7 @@ class AffineTransform(AffineBase):
         """Signal that this transform has updated."""
         # note: this function has been heavily micro-optimized
         # please don't modify it carelessly
-        last_modified = perf_counter_ns()
+        last_modified = modification_stamp()
         self.last_modified = last_modified
         if wrapper := self._wrapper:
             wrapper.flag_update(last_modified)
@@ -822,7 +838,7 @@ class RecursiveTransform(AffineBase):
         is_camera_space=False,
     ) -> None:
         super().__init__(reference_up=reference_up, is_camera_space=is_camera_space)
-        self.last_modified = perf_counter_ns()
+        self.last_modified = modification_stamp()
         self._parent = parent
         self.children = []
         self.own = base
@@ -833,7 +849,7 @@ class RecursiveTransform(AffineBase):
         # note: this function has been heavily micro-optimized
         # please don't modify it carelessly
         if last_modified is None:
-            last_modified = perf_counter_ns()
+            last_modified = modification_stamp()
         self.last_modified = last_modified
         if children := self.children:
             for child in children:
