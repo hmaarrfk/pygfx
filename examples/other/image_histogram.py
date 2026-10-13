@@ -44,6 +44,12 @@ nbins = 256
 canvas = RenderCanvas(size=(800, 600))
 renderer = gfx.renderers.WgpuRenderer(canvas)
 
+# The size of the workgroups depends on what the GPU allows. WebGPU guarantees
+# 256 invocations per workgroup, most desktop GPU's allow 1024 or more.
+# With 4 channels, that makes chunks of 8x8 or 16x16 pixels.
+max_invocations = renderer.device.limits["max-compute-invocations-per-workgroup"]
+chunk_size = 16 if max_invocations >= 1024 else 8
+
 # Scene, camera, controller
 scene = gfx.Scene()
 scene.add(gfx.Background.from_color("#777"))
@@ -128,11 +134,12 @@ camera.show_object(scene)
 # In the current implementation, this is partially solved by using a
 # workgroup, which has its own temporary histogram, so that the
 # different workgroups don't get in each-others way. After that. each
-# thread in a workgroup is then responsible for adding a single
-# histogram value to the final histogram buffer.
+# thread in a workgroup is then responsible for adding its share of the
+# histogram values to the final histogram buffer (a single value when
+# the workgroup has as many invocations as there are values).
 #
 # The second shader simply copies values from the histogram into the
-# positions buffer, where we can use 1024 cores, so it's parellized
+# positions buffer, where we can use up to 1024 cores, so it's parellized
 # pretty well.
 #
 # Took inspiration from https://webgpufundamentals.org/webgpu/lessons/webgpu-compute-shaders-histogram.html
@@ -153,13 +160,16 @@ camera.show_object(scene)
 
 histogram_wgsl = """
 
-const chunkWidth = 16u;
-const chunkHeight = 16u;
+const chunkWidth = CHUNK_SIZEu;
+const chunkHeight = CHUNK_SIZEu;
 const chunkDepth = 4u;
 
 const chunkSize = chunkWidth * chunkHeight * chunkDepth;
-const binCount = chunkWidth * chunkHeight;
-var<workgroup> bins: array<atomic<u32>, chunkSize>;
+const binCount = NBINSu;
+const binsSize = binCount * chunkDepth;
+// How many values of the histogram each invocation takes care of
+const binsPerInvocation = binsSize / chunkSize;
+var<workgroup> bins: array<atomic<u32>, binsSize>;
 
 
 @group(0) @binding(0) var imageTexture: texture_2d<f32>;
@@ -180,8 +190,10 @@ fn calc_histogram(
 
     // Write zeros to the workgroup array
     // There is no risk on race conditions here, but the WGSL spec requires using an atomic operation.
-    let binIndex = local_invocation_index;
-    atomicStore(&bins[binIndex], 0u);
+    let firstBinIndex = local_invocation_index * binsPerInvocation;
+    for (var i = 0u; i < binsPerInvocation; i++) {
+        atomicStore(&bins[firstBinIndex + i], 0u);
+    }
 
     workgroupBarrier();
 
@@ -205,9 +217,12 @@ fn calc_histogram(
     workgroupBarrier();
 
     // Copy the bin values from our workgroup array to the storage buffer.
-    let binValue = atomicLoad(&bins[binIndex]);
-    if (binValue > 0) {
-        atomicAdd(&sa_bins[binIndex], binValue);
+    for (var i = 0u; i < binsPerInvocation; i++) {
+        let binIndex = firstBinIndex + i;
+        let binValue = atomicLoad(&bins[binIndex]);
+        if (binValue > 0) {
+            atomicAdd(&sa_bins[binIndex], binValue);
+        }
     }
 }
 
@@ -218,7 +233,8 @@ fn calc_histogram(
 // The scale is hard-coded, but we could add another pass to calculate it
 const scale = 1.0 / 100.0;
 
-@compute @workgroup_size(binCount, chunkDepth)
+// One workgroup per piece of the histogram, with as many invocations as the chunks above
+@compute @workgroup_size(chunkWidth * chunkHeight, chunkDepth)
 fn write_histogram(
     @builtin(global_invocation_id) global_invocation_id: vec3u,
 ) {
@@ -254,6 +270,9 @@ fn write_histogram(
 
 
 """
+
+histogram_wgsl = histogram_wgsl.replace("CHUNK_SIZE", str(chunk_size))
+histogram_wgsl = histogram_wgsl.replace("NBINS", str(nbins))
 
 
 hist_calc_shader = ComputeShader(
@@ -314,8 +333,11 @@ gui_renderer.set_gui(draw_imgui)
 def animate():
     if hist_calc_shader.changed:
         size = image_object.geometry.grid.size
-        hist_calc_shader.dispatch((size[0] + 15) // 16, (size[1] + 15) // 16)
-        hist_write_shader.dispatch(1)
+        hist_calc_shader.dispatch(
+            (size[0] + chunk_size - 1) // chunk_size,
+            (size[1] + chunk_size - 1) // chunk_size,
+        )
+        hist_write_shader.dispatch(nbins // chunk_size**2)
 
     renderer.render(scene, camera)
     gui_renderer.render()
