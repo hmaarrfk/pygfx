@@ -171,9 +171,10 @@ class ComputeShader:
                 bindings.append(
                     {
                         "binding": index,
-                        "resource": wgpu_object.create_view(
-                            usage=wgpu.TextureUsage.STORAGE_BINDING
-                        ),
+                        # A view with the usages of the texture: which one is needed
+                        # depends on how the shader declares the binding (a storage
+                        # texture, or a texture to use with textureLoad).
+                        "resource": wgpu_object.create_view(),
                     }
                 )
             else:
