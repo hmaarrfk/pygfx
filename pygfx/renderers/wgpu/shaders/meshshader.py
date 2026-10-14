@@ -5,7 +5,7 @@ import wgpu  # only for flags/enums
 
 from ....objects import Mesh, InstancedMesh, SkinnedMesh, WorldObject, Line, Points
 from ....resources import Buffer, Texture, TextureMap
-from ....utils import normals_from_vertices
+from ....utils import normals_from_vertices, array_from_shadertype
 from ....materials import (
     MeshBasicMaterial,
     MeshPhongMaterial,
@@ -110,9 +110,14 @@ class MeshShader(BaseShader):
 
         # todo: Only "UVMapping mode" have "transform" and "uv_channel"
         # todo: introduce "MappingMode" in TextureMap
-        bindings.append(
-            Binding(f"u_{name}", "buffer/uniform", map.uniform_buffer, "FRAGMENT"),
-        )
+        if self._map_transforms is not None:
+            # Collected in a single uniform buffer, see get_bindings()
+            self._map_transforms[name] = map
+        else:
+            # Called after get_bindings() (e.g. by a subclass that overrides it)
+            bindings.append(
+                Binding(f"u_{name}", "buffer/uniform", map.uniform_buffer, "FRAGMENT"),
+            )
 
         if map.uv_channel not in self["used_uv"]:
             texcoords = getattr(geometry, f"texcoords{map.uv_channel or ''}", None)
@@ -133,7 +138,35 @@ class MeshShader(BaseShader):
 
         return bindings
 
+    _map_transforms = None
+
     def get_bindings(self, wobject, shared, scene):
+        # The uv transform of each texture map is a mat3x3. A uniform buffer for
+        # each of them would make a material with many maps exceed the number of
+        # uniform buffers per shader stage (12 in WebGPU). Instead, the maps that
+        # _define_texture_map() collects are put together in one uniform buffer,
+        # which the maps keep up to date.
+        self._map_transforms = {}
+        try:
+            result = self._get_bindings(wobject, shared, scene)
+            if self._map_transforms:
+                uniform_type = {name: "3x3xf4" for name in self._map_transforms}
+                buffer = Buffer(
+                    array_from_shadertype(uniform_type), force_contiguous=True
+                )
+                for name, map in self._map_transforms.items():
+                    map._gfx_copy_transform_to(buffer, name)
+                binding = Binding(
+                    "u_map_transforms", "buffer/uniform", buffer, "FRAGMENT"
+                )
+                index = len(result[0])
+                result[0][index] = binding
+                self.define_bindings(0, {index: binding})
+        finally:
+            self._map_transforms = None
+        return result
+
+    def _get_bindings(self, wobject, shared, scene):
         geometry = wobject.geometry
         material = wobject.material
 
@@ -527,8 +560,8 @@ class MeshToonShader(MeshShader):
         super().__init__(wobject)
         self["lighting"] = "toon"
 
-    def get_bindings(self, wobject, shared, scene):
-        result = super().get_bindings(wobject, shared, scene)
+    def _get_bindings(self, wobject, shared, scene):
+        result = super()._get_bindings(wobject, shared, scene)
 
         geometry = wobject.geometry
         material = wobject.material
@@ -558,8 +591,8 @@ class MeshStandardShader(MeshShader):
         super().__init__(wobject)
         self["lighting"] = "pbr"
 
-    def get_bindings(self, wobject, shared, scene):
-        result = super().get_bindings(wobject, shared, scene)
+    def _get_bindings(self, wobject, shared, scene):
+        result = super()._get_bindings(wobject, shared, scene)
 
         geometry = wobject.geometry
         material = wobject.material
@@ -625,8 +658,8 @@ class MeshPhysicalShader(MeshStandardShader):
         self["USE_IOR"] = True
         self["USE_SPECULAR"] = True
 
-    def get_bindings(self, wobject, shared, scene):
-        result = super().get_bindings(wobject, shared, scene)
+    def _get_bindings(self, wobject, shared, scene):
+        result = super()._get_bindings(wobject, shared, scene)
 
         geometry = wobject.geometry
         material = wobject.material

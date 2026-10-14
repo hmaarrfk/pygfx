@@ -1,3 +1,5 @@
+import weakref
+
 import numpy as np
 from ..utils.trackable import Trackable
 from ..resources import Buffer
@@ -70,6 +72,8 @@ class TextureMap(Trackable):
         self._store.uniform_buffer = Buffer(
             array_from_shadertype(self.uniform_type), force_contiguous=True
         )
+        # Other uniform buffers that hold a copy of the transform: buffer -> field names
+        self._transform_copies = weakref.WeakKeyDictionary()
         self.update_matrix()
 
     @property
@@ -213,6 +217,20 @@ class TextureMap(Trackable):
 
         self.uniform_buffer.data["transform"][:, :3] = matrix.T
         self.uniform_buffer.update_full()
+        for buffer, fields in self._transform_copies.items():
+            for field in fields:
+                buffer.data[field] = self.uniform_buffer.data["transform"]
+            buffer.update_full()
+
+    def _gfx_copy_transform_to(self, buffer, field):
+        """Keep ``buffer.data[field]`` equal to the transform of this map.
+
+        Used by shaders that put the transforms of several maps in one uniform
+        buffer, because the number of uniform buffers per shader stage is limited.
+        """
+        self._transform_copies.setdefault(buffer, set()).add(field)
+        buffer.data[field] = self.uniform_buffer.data["transform"]
+        buffer.update_full()
 
     @property
     def uniform_buffer(self):
