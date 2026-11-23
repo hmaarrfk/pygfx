@@ -264,6 +264,12 @@ class WorldObject(EventTarget, Trackable):
     # in ``__init_subclass__``.
     _update_object_every_frame: ClassVar[bool] = False
 
+    # Whether the renderer may skip this object when its bounds, derived from
+    # ``geometry.grid`` and the world transform, are outside the camera's
+    # view. Only for objects whose drawn pixels stay inside those bounds
+    # (Image, Volume). A subclass that draws outside them sets this to False.
+    _cull_with_grid_bounds: ClassVar[bool] = False
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         cls._update_object_every_frame = (

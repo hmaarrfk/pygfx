@@ -360,6 +360,8 @@ class Image(WorldObject):
 
     """
 
+    _cull_with_grid_bounds = True
+
     def _wgpu_get_pick_info(self, pick_value) -> dict:
         info = super()._wgpu_get_pick_info(pick_value)
         tex = self.geometry.grid
@@ -402,6 +404,8 @@ class Volume(WorldObject):
         The position of the object in the world. Default (0, 0, 0).
 
     """
+
+    _cull_with_grid_bounds = True
 
     def _wgpu_get_pick_info(self, pick_value) -> dict:
         info = super()._wgpu_get_pick_info(pick_value)

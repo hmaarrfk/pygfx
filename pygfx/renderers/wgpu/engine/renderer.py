@@ -27,6 +27,7 @@ from ....resources import Texture
 from ....resources._base import resource_update_registry
 from ....utils import Color
 from ....utils.enums import PixelFilter
+from ....geometries._base import GRID_EPOCH
 from ....utils.trackable import dirty_trackers
 from ... import Renderer
 from .blender import Blender
@@ -94,7 +95,14 @@ class _RenderableCache:
         "all_wobjects",
         "always_rows",
         "collect_states",
+        "cull_center",
+        "cull_extent",
+        "cull_local",
+        "cull_ok",
+        "cull_results",
+        "cull_rows",
         "dist_no_camera",
+        "grid_epoch",
         "group_order",
         "has_weighted",
         "positions",
@@ -152,6 +160,21 @@ class _RenderableCache:
         self.positions = (
             np.asarray(pos_l, np.float64) if pos_l else np.empty((0, 3), np.float64)
         )
+        # Frustum culling: objects drawn within their grid bounds can be
+        # skipped when those bounds are out of view. Bounds are filled in by
+        # update_cull_bounds (at first use, and when grids are replaced) and
+        # update_objects (when objects move).
+        n = len(wobjects)
+        self.cull_rows = np.array(
+            [r for r, w in enumerate(wobjects) if w._cull_with_grid_bounds], np.int64
+        )
+        self.cull_ok = np.zeros(n, bool)  # cullable and has bounds
+        self.cull_local = np.zeros((n, 2, 3))
+        self.cull_center = np.zeros((n, 3))
+        self.cull_extent = np.zeros((n, 3))
+        self.cull_results = []
+        self.grid_epoch = None
+
         # Depth flag when there is no camera: -1 everywhere, 0 for weighted.
         dist = np.full(len(wobjects), -1.0)
         if self.has_weighted:
@@ -219,6 +242,77 @@ class _RenderableCache:
         # An object that becomes visible may have moved while hidden (hidden
         # objects are not swept), so the next sweep must visit everything.
         self.swept_root = None
+        self.cull_results = []
+
+    def update_cull_bounds(self, rows=None, local=True):
+        """Recompute the world bounds (center, half extent) used for culling,
+        for the given renderable rows (default: all cullable rows). With
+        ``local``, also re-read the local bounds from the geometry."""
+        if rows is None:
+            rows = self.cull_rows
+        if not len(rows):
+            return
+        wobjects = self.wobjects
+        if local:
+            for r in rows:
+                bounds = wobjects[r]._get_bounds_from_geometry()
+                if bounds is None:
+                    self.cull_ok[r] = False
+                else:
+                    self.cull_ok[r] = True
+                    self.cull_local[r] = bounds.aabb
+        rows = rows[self.cull_ok[rows]]
+        if not len(rows):
+            return
+        matrices = np.stack([wobjects[r].world.matrix for r in rows])
+        lo, hi = self.cull_local[rows, 0], self.cull_local[rows, 1]
+        linear = matrices[:, :3, :3]
+        self.cull_center[rows] = (
+            np.einsum("nij,nj->ni", linear, (lo + hi) * 0.5) + matrices[:, :3, 3]
+        )
+        self.cull_extent[rows] = np.einsum(
+            "nij,nj->ni", np.abs(linear), (hi - lo) * 0.5
+        )
+
+    def select_in_view(self, cull_matrix):
+        """The visible renderables that are not outside the view of
+        ``cull_matrix`` (projection @ view). Returns (wrappers, arrays, rows),
+        like the ``visible_*`` attributes.
+
+        An object is outside when its world bounding box is entirely beyond
+        one of the four side planes of the clip volume (near and far are not
+        used, so depth conventions do not matter). Only objects with
+        ``cull_ok`` can be outside. The result is reused while the same
+        objects are in view, so that the draw list stays the same object.
+        """
+        rows = self.visible_rows
+        ok = self.cull_ok if rows is None else self.cull_ok[rows]
+        if not ok.any():
+            return self.visible_wrappers, self.visible_arrays, rows
+        m = np.asarray(cull_matrix, np.float64)
+        # Clip-space side planes as (a, b, c, d) with inside: a*x + b*y + c*z + d >= 0
+        planes = np.stack([m[3] + m[0], m[3] - m[0], m[3] + m[1], m[3] - m[1]])
+        centers = self.cull_center if rows is None else self.cull_center[rows]
+        extents = self.cull_extent if rows is None else self.cull_extent[rows]
+        dist = centers @ planes[:, :3].T + planes[:, 3]
+        radius = extents @ np.abs(planes[:, :3]).T
+        outside = (dist < -radius).any(axis=1) & ok
+        if not outside.any():
+            return self.visible_wrappers, self.visible_arrays, rows
+        keep = ~outside
+        for prev_keep, result in self.cull_results:
+            if np.array_equal(prev_keep, keep):
+                return result
+        sel = np.flatnonzero(keep)
+        wrappers = self.visible_wrappers
+        result = (
+            [wrappers[i] for i in sel],
+            tuple(a[sel] for a in self.visible_arrays),
+            sel if rows is None else rows[sel],
+        )
+        self.cull_results.insert(0, (keep, result))
+        del self.cull_results[4:]
+        return result
 
     def update_objects(self, object_count, root):
         """Per-frame sweep over every visible object: assign renderer-ids to
@@ -246,6 +340,7 @@ class _RenderableCache:
         allw = self.all_wobjects
         always = self.all_update_always
         visible = self.all_visible
+        moved = []
         for i in rows:
             if not visible[i]:
                 continue
@@ -256,18 +351,25 @@ class _RenderableCache:
             lm = wobject.world.last_modified
             if lm != stamps[i] or always[i]:
                 wobject._update_object()
-                stamps[i] = lm
-                # Always refresh: the stamp is now current, so a later frame
-                # that does need positions would not refresh it.
-                r = renderable_rows[i]
-                if r >= 0:
-                    positions[r] = wobject.world.position
+                if lm != stamps[i]:
+                    stamps[i] = lm
+                    # Always refresh: the stamp is now current, so a later
+                    # frame that does need positions would not refresh it.
+                    r = renderable_rows[i]
+                    if r >= 0:
+                        positions[r] = wobject.world.position
+                        moved.append(r)
+        if moved:
+            moved = np.array(moved, np.int64)
+            self.update_cull_bounds(moved[self.cull_ok[moved]], local=False)
         return object_count
 
 
 class FlatScene:
-    def __init__(self, scene, view_matrix=None, object_count=0):
+    def __init__(self, scene, view_matrix=None, object_count=0, cull_matrix=None):
         self._view_matrix = view_matrix
+        # projection @ view matrix to cull objects outside the view (or None)
+        self._cull_matrix = cull_matrix
         self._wobject_wrappers = []  # WobjectWrapper's
         self._collect_states = None  # list of _CollectState, shared via the cache
         self._pass_lists = None
@@ -360,6 +462,11 @@ class FlatScene:
         if cache.visibility_version != index.visibility_version:
             cache.select_visible()
             cache.visibility_version = index.visibility_version
+        cull_matrix = self._cull_matrix
+        if cull_matrix is not None and cache.grid_epoch != GRID_EPOCH[0]:
+            # First use, or a geometry's grid was replaced somewhere
+            cache.update_cull_bounds()
+            cache.grid_epoch = GRID_EPOCH[0]
 
         need_pos = view_matrix is not None
 
@@ -379,17 +486,23 @@ class FlatScene:
             if wobject._effective_visible:
                 shadow_objects.append(wobject)
 
-        self._wobject_wrappers = cache.visible_wrappers
+        wrappers, arrays, rows = (
+            cache.visible_wrappers,
+            cache.visible_arrays,
+            cache.visible_rows,
+        )
+        if cull_matrix is not None:
+            wrappers, arrays, rows = cache.select_in_view(cull_matrix)
+        self._wobject_wrappers = wrappers
         self._collect_states = cache.collect_states
-        if not cache.visible_wrappers:
+        if not wrappers:
             self._sort_arrays = None
             return
 
-        rq, go, ro, sign, weighted, dist_no_camera = cache.visible_arrays
+        rq, go, ro, sign, weighted, dist_no_camera = arrays
         if not need_pos:
             dist_a = dist_no_camera
         else:
-            rows = cache.visible_rows
             positions = cache.positions if rows is None else cache.positions[rows]
             relative = la.vec_transform(positions, view_matrix, projection=False)
             dist_a = -relative[:, 2] * sign  # fresh array
@@ -582,6 +695,11 @@ class WgpuRenderer(RootEventHandler, Renderer):
     # ``_get_render_bundle``). Set to False on a subclass or instance to always
     # issue the draw calls directly.
     _use_render_bundles = True
+
+    # Skip objects that are entirely outside the camera's view. Only objects
+    # with ``_cull_with_grid_bounds`` (Image, Volume) are culled. Set to False
+    # on a subclass or instance to always draw every visible object.
+    _use_frustum_culling = True
 
     def __init__(
         self,
@@ -1121,7 +1239,8 @@ class WgpuRenderer(RootEventHandler, Renderer):
         view_matrix = None
         if self._sort_objects:
             view_matrix = camera.view_matrix  # == camera.world.inverse_matrix
-        flat = FlatScene(scene, view_matrix, self._object_count)
+        cull_matrix = camera.camera_matrix if self._use_frustum_culling else None
+        flat = FlatScene(scene, view_matrix, self._object_count, cull_matrix)
         self._object_count = flat.object_count
         flat.sort()
 

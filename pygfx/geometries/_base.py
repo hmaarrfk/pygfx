@@ -15,6 +15,12 @@ if TYPE_CHECKING:
 
 Optional = None
 
+# Incremented whenever any geometry's ``grid`` is assigned. The bounds of
+# grid-based objects (Image, Volume) depend only on the grid texture's size
+# (which is fixed per texture) and the object's transform, so this is how the
+# renderer knows that cached bounds (used for frustum culling) may be stale.
+GRID_EPOCH = [0]
+
 
 class Geometry(Store):
     """An object's geometry is a container for data that 'defines' (the shape of) the object.
@@ -145,6 +151,11 @@ class Geometry(Store):
 
             # Store
             setattr(self, name, resource)
+
+    def __setattr__(self, key, value):
+        Store.__setattr__(self, key, value)
+        if key == "grid":
+            GRID_EPOCH[0] += 1
 
     def __repr__(self) -> str:
         # A Store is a subclass of a dict, but it does not look like a dict,
