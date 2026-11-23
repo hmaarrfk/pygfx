@@ -359,3 +359,43 @@ def test_flatscene_positions_fresh_after_render_without_camera():
     order = _order(scene, cam.view_matrix)
     assert order == _reference(scene, cam.view_matrix)
     assert order == [b, a]  # blended: back to front
+
+
+def test_flatscene_visibility_changes_do_not_rebuild():
+    # Showing and hiding objects re-selects the visible subset of the cached
+    # structure instead of rebuilding it, and stays correct: an object moved
+    # while hidden is synced when shown, even if nothing else moved, and an
+    # object that starts hidden gets a renderer-id once shown.
+    scene = gfx.Scene()
+    obs = [_pts() for _ in range(5)]
+    scene.add(*obs)
+    late = _pts(visible=False)
+    scene.add(late)
+    cam = gfx.PerspectiveCamera(70, 1)
+    cam.local.z = 10
+    vm = cam.view_matrix
+
+    flat = FlatScene(scene, vm, 0)
+    cache = scene._renderable_cache
+    assert late not in [w.wobject for w in flat._wobject_wrappers]
+    assert late._renderer_id == 0
+
+    obs[1].visible = False
+    order = _order(scene, vm)
+    assert scene._renderable_cache is cache  # no rebuild
+    assert obs[1] not in order
+    assert order == _reference(scene, vm)
+
+    obs[1].local.x = 7.0  # moved while hidden
+    count = FlatScene(scene, vm, flat.object_count).object_count
+    count = FlatScene(scene, vm, count).object_count  # nothing moved: skip
+    obs[1].visible = True  # shown; no transform changes since
+    count = FlatScene(scene, vm, count).object_count
+    assert _uniform_x(obs[1]) == 7.0
+    assert scene._renderable_cache is cache
+
+    late.visible = True
+    order = _order(scene, vm)
+    assert late in order and late._renderer_id > 0
+    assert order == _reference(scene, vm)
+    assert scene._renderable_cache is cache

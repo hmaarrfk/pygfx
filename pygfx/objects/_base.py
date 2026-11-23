@@ -120,6 +120,7 @@ class _SubtreeIndex:
         "renderable",
         "shadow_casters",
         "version",
+        "visibility_version",
     )
 
     def __init__(self):
@@ -137,6 +138,10 @@ class _SubtreeIndex:
         # state changes; the renderer's per-scene cache compares it to know
         # when to rebuild. Scoped to this object's subtree (no global state).
         self.version = 0
+        # Bumped when the visibility of an object in this subtree changes.
+        # Visibility does not change the lists, so the renderer only
+        # re-selects the visible objects instead of rebuilding.
+        self.visibility_version = 0
 
     def add_object(self, obj: "WorldObject") -> None:
         """Insert ``obj`` into the relevant categorized lists."""
@@ -431,6 +436,14 @@ class WorldObject(EventTarget, Trackable):
             if index is not None:
                 index.version += 1
 
+    def _bump_visibility_version(self) -> None:
+        """Signal a visibility change in this subtree to every ancestor's
+        index (like ``_bump_render_version``, but cheaper to handle)."""
+        for node in self._iter_self_and_ancestors():
+            index = node._subtree_index
+            if index is not None:
+                index.visibility_version += 1
+
     def _refresh_caster_status(self) -> None:
         """Recompute self's shadow-caster status and propagate to every
         ancestor's ``shadow_casters`` list."""
@@ -659,7 +672,7 @@ class WorldObject(EventTarget, Trackable):
     def visible(self, visible: bool) -> None:
         self._store.visible = bool(visible)
         self._refresh_visibility_subtree()
-        self._bump_render_version()
+        self._bump_visibility_version()
 
     @property
     def render_order(self) -> float:

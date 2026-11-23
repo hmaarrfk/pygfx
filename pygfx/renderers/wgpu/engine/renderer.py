@@ -80,12 +80,17 @@ class _RenderableCache:
     distance) is recomputed per frame; object *positions* are refreshed
     incrementally via ``transform.last_modified`` so that moving objects don't
     force a full rebuild.
+
+    The cache holds hidden objects too. A visibility change only bumps
+    ``_subtree_index.visibility_version``, after which the visible subset is
+    selected again (``select_visible``), which is much cheaper than a rebuild.
     """
 
     __slots__ = (
         "all_renderable_row",
         "all_stamps",
         "all_update_always",
+        "all_visible",
         "all_wobjects",
         "always_rows",
         "collect_states",
@@ -99,21 +104,24 @@ class _RenderableCache:
         "swept_root",
         "swept_root_modified",
         "version",
+        "visibility_version",
+        "visible_arrays",
+        "visible_rows",
+        "visible_wrappers",
         "weighted",
         "wobjects",
         "wrappers",
     )
 
     @classmethod
-    def build(cls, scene, scene_visible, index):
+    def build(cls, scene, index):
         self = cls()
         self.collect_states = []
+        # All renderables, also hidden ones (see select_visible)
         renderables = []
-        if scene_visible and scene._renderable_in_index:
+        if scene._renderable_in_index:
             renderables.append(scene)
-        for wobject in index.renderable:
-            if wobject._effective_visible:
-                renderables.append(wobject)
+        renderables.extend(index.renderable)
 
         wobjects, wrappers = [], []
         rq_l, go_l, ro_l, sign_l, w_l, pos_l = [], [], [], [], [], []
@@ -150,15 +158,15 @@ class _RenderableCache:
             dist[self.weighted] = 0.0
         self.dist_no_camera = dist
 
-        # All visible objects (not just renderables) need a renderer-id and a
-        # per-frame transform refresh. Cache that list too, plus for each entry
-        # the row into ``positions`` if it is a renderable (else -1), so the
-        # per-frame pass updates transforms and renderable positions in one
-        # sweep. ``all_stamps`` starts at -1 so the first frame after a (re)build
-        # runs ``_update_object`` for everything (syncing uniforms).
+        # All objects (not just renderables) need a renderer-id and a
+        # per-frame transform refresh when visible. Cache that list too, plus
+        # for each entry the row into ``positions`` if it is a renderable (else
+        # -1), so the per-frame pass updates transforms and renderable
+        # positions in one sweep. ``all_stamps`` starts at -1 so the first
+        # frame after a (re)build runs ``_update_object`` for everything.
         row_of = {w: r for r, w in enumerate(wobjects)}
-        all_raw = [scene] if scene_visible else []
-        all_raw += [w for w in index.all_objects if w._effective_visible]
+        all_raw = [scene]
+        all_raw.extend(index.all_objects)
         self.all_renderable_row = np.array(
             [row_of.get(w, -1) for w in all_raw], np.int64
         )
@@ -176,7 +184,41 @@ class _RenderableCache:
         # The root transform's ``subtree_modified`` at the last full sweep
         self.swept_root = None
         self.swept_root_modified = None
+        self.visibility_version = None  # select_visible() runs on first use
         return self
+
+    def select_visible(self):
+        """Select the visible renderables (and the visible objects for the
+        sweep). Called after a (re)build and after visibility changes."""
+        visible = [w._effective_visible for w in self.wobjects]
+        if all(visible):
+            self.visible_rows = None
+            self.visible_wrappers = self.wrappers
+            self.visible_arrays = (
+                self.render_queue,
+                self.group_order,
+                self.render_order,
+                self.sign,
+                self.weighted,
+                self.dist_no_camera,
+            )
+        else:
+            rows = np.flatnonzero(np.array(visible, bool))
+            self.visible_rows = rows
+            wrappers = self.wrappers
+            self.visible_wrappers = [wrappers[i] for i in rows]
+            self.visible_arrays = (
+                self.render_queue[rows],
+                self.group_order[rows],
+                self.render_order[rows],
+                self.sign[rows],
+                self.weighted[rows],
+                self.dist_no_camera[rows],
+            )
+        self.all_visible = [w._effective_visible for w in self.all_wobjects]
+        # An object that becomes visible may have moved while hidden (hidden
+        # objects are not swept), so the next sweep must visit everything.
+        self.swept_root = None
 
     def update_objects(self, object_count, root):
         """Per-frame sweep over every visible object: assign renderer-ids to
@@ -203,7 +245,10 @@ class _RenderableCache:
         positions = self.positions
         allw = self.all_wobjects
         always = self.all_update_always
+        visible = self.all_visible
         for i in rows:
+            if not visible[i]:
+                continue
             wobject = allw[i]
             if wobject._renderer_id == 0:
                 object_count += 1
@@ -309,9 +354,12 @@ class FlatScene:
         cache = getattr(scene, "_renderable_cache", None)
         version = index.version
         if cache is None or cache.version != version:
-            cache = _RenderableCache.build(scene, scene_visible, index)
+            cache = _RenderableCache.build(scene, index)
             cache.version = version
             scene._renderable_cache = cache
+        if cache.visibility_version != index.visibility_version:
+            cache.select_visible()
+            cache.visibility_version = index.visibility_version
 
         need_pos = view_matrix is not None
 
@@ -331,26 +379,24 @@ class FlatScene:
             if wobject._effective_visible:
                 shadow_objects.append(wobject)
 
-        self._wobject_wrappers = cache.wrappers
+        self._wobject_wrappers = cache.visible_wrappers
         self._collect_states = cache.collect_states
-        if not cache.wobjects:
+        if not cache.visible_wrappers:
             self._sort_arrays = None
             return
 
+        rq, go, ro, sign, weighted, dist_no_camera = cache.visible_arrays
         if not need_pos:
-            dist_a = cache.dist_no_camera
+            dist_a = dist_no_camera
         else:
-            relative = la.vec_transform(cache.positions, view_matrix, projection=False)
-            dist_a = -relative[:, 2] * cache.sign  # fresh array
+            rows = cache.visible_rows
+            positions = cache.positions if rows is None else cache.positions[rows]
+            relative = la.vec_transform(positions, view_matrix, projection=False)
+            dist_a = -relative[:, 2] * sign  # fresh array
             if cache.has_weighted:
-                dist_a[cache.weighted] = 0.0
+                dist_a[weighted] = 0.0
 
-        self._sort_arrays = (
-            cache.render_queue,
-            cache.group_order,
-            cache.render_order,
-            dist_a,
-        )
+        self._sort_arrays = (rq, go, ro, dist_a)
 
     def sort(self):
         """Sort the world objects (stable depth sort via ``np.lexsort``)."""
