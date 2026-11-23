@@ -31,6 +31,7 @@ from ... import Renderer
 from .blender import Blender
 from .effectpasses import DDAAPass, EffectPass, FXAAPass, OutputPass, PPAAPass
 from .mipmapsutil import generate_texture_mipmaps
+from . import pipeline as _pipeline
 from .pipeline import RenderPassState, get_pipeline_container_group
 from .renderstate import get_renderstate
 from .shadowutil import render_shadow_maps
@@ -443,6 +444,11 @@ class WgpuRenderer(RootEventHandler, Renderer):
         canvas downloads.
     """
 
+    # Replay unchanged render passes from a recorded render bundle (see
+    # ``_get_render_bundle``). Set to False on a subclass or instance to always
+    # issue the draw calls directly.
+    _use_render_bundles = True
+
     def __init__(
         self,
         target,
@@ -495,6 +501,8 @@ class WgpuRenderer(RootEventHandler, Renderer):
 
         # Cache renderstate objects for n draws
         self._renderstates_per_flush = []
+        # Recorded render bundles: key -> [signature, containers, bundle]
+        self._render_bundles = {}
 
         # Get target format
         self.gamma_correction = gamma_correction
@@ -1144,26 +1152,44 @@ class WgpuRenderer(RootEventHandler, Renderer):
 
         blender = self._blender
         rendered_something = False
+        # Identifies this render() call within the current flush, so that a
+        # recorded render bundle is only reused for the same call next frame.
+        call_index = len(self._renderstates_per_flush[0])
 
-        for iter in flat.iter_render_pipelines_per_pass_type():
-            pass_type, render_pipeline_containers = iter
-
+        for pass_index, (pass_type, render_pipeline_containers) in enumerate(
+            flat.iter_render_pipelines_per_pass_type()
+        ):
             # Only render this pass type if there are objects
             if not render_pipeline_containers:
                 continue
             rendered_something = True
 
+            color_attachments = blender.get_color_attachments(pass_type)
+            depth_stencil_attachment = blender.get_depth_stencil_attachment()
             render_pass = command_encoder.begin_render_pass(
-                color_attachments=blender.get_color_attachments(pass_type),
-                depth_stencil_attachment=blender.get_depth_stencil_attachment(),
+                color_attachments=color_attachments,
+                depth_stencil_attachment=depth_stencil_attachment,
                 occlusion_query_set=None,
             )
 
             render_pass.set_viewport(*physical_viewport)
 
-            pass_state = RenderPassState()
-            for render_pipeline_container in render_pipeline_containers:
-                render_pipeline_container.draw(render_pass, renderstate, pass_state)
+            bundle = None
+            if self._use_render_bundles:
+                bundle_key = (id(flat.scene), call_index, pass_index, pass_type)
+                bundle = self._get_render_bundle(
+                    bundle_key,
+                    renderstate,
+                    render_pipeline_containers,
+                    color_attachments,
+                    depth_stencil_attachment,
+                )
+            if bundle is not None:
+                render_pass.execute_bundles([bundle])
+            else:
+                pass_state = RenderPassState()
+                for render_pipeline_container in render_pipeline_containers:
+                    render_pipeline_container.draw(render_pass, renderstate, pass_state)
 
             render_pass.end()
 
@@ -1177,6 +1203,62 @@ class WgpuRenderer(RootEventHandler, Renderer):
             blender.get_depth_stencil_attachment()
 
         return [command_encoder.finish()]
+
+    def _get_render_bundle(
+        self,
+        key,
+        renderstate,
+        containers,
+        color_attachments,
+        depth_stencil_attachment,
+    ):
+        """Return a render bundle for this pass's draw list, or None to draw directly.
+
+        A bundle replays the recorded draw calls on the GPU side, so the CPU
+        cost of an unchanged pass no longer grows with the number of objects.
+        A bundle is recorded only once the same draw list has been seen two
+        frames in a row (a list that changes every frame is drawn directly,
+        so it does not pay for recording), and reused while nothing that it
+        bakes in has changed: the containers (same objects, same order), their
+        pipelines/bind groups/draw ranges (tracked by ``PIPELINE_EPOCH``), the
+        renderstate and the target formats. Passes that need a stencil
+        reference other than 0 are not bundled, because a bundle cannot set it.
+        """
+        depth_format = None
+        if depth_stencil_attachment is not None:
+            depth_format = depth_stencil_attachment.view.texture.format
+        signature = (
+            tuple(a.view.texture.format for a in color_attachments),
+            depth_format,
+            color_attachments[0].view.texture.sample_count,
+            renderstate,
+            renderstate.wgpu_bind_group,
+            _pipeline.PIPELINE_EPOCH,
+        )
+        bundles = self._render_bundles
+        entry = bundles.get(key)
+        if entry is None or entry[0] != signature or entry[1] != containers:
+            # New or changed draw list: draw directly, remember it.
+            bundles.pop(key, None)
+            bundles[key] = [signature, list(containers), None]
+            while len(bundles) > 64:
+                bundles.pop(next(iter(bundles)))
+            return None
+        if entry[2] is None:
+            # Second frame in a row with the same draw list: record it.
+            for container in containers:
+                if not container.broken and container.wobject_info["stencil_value"]:
+                    return None  # bundles cannot set the stencil reference
+            encoder = self._device.create_render_bundle_encoder(
+                color_formats=list(signature[0]),
+                depth_stencil_format=depth_format,
+                sample_count=signature[2],
+            )
+            pass_state = RenderPassState()
+            for container in containers:
+                container.draw(encoder, renderstate, pass_state)
+            entry[2] = encoder.finish()
+        return entry[2]
 
     def _update_stdinfo_buffer(
         self, camera: Camera, physical_size, physical_offset, logical_size, ndc_offset

@@ -19,6 +19,12 @@ from .utils import GpuCache, hash_from_value, registry
 
 PIPELINE_CONTAINER_GROUPS = WeakAssociativeContainer()
 
+# Incremented whenever any PipelineContainerGroup updates its containers
+# (new pipelines, bind groups, render info, ...). The renderer uses it to
+# know that a recorded render bundle may be stale. Read it as
+# ``pipeline.PIPELINE_EPOCH`` (module attribute), not via ``from ... import``.
+PIPELINE_EPOCH = 0
+
 # These caches use an LRU strategy.
 # They store a limited number of recently used GPU resources to improve cache hit rates.
 # This enables reuse of GPU resources across similar objects, reducing the overhead of
@@ -236,6 +242,9 @@ class PipelineContainerGroup:
 
         if not changed:
             return
+
+        global PIPELINE_EPOCH
+        PIPELINE_EPOCH += 1
 
         if "create" in changed:
             self.compute_containers = ()
