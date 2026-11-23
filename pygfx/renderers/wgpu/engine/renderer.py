@@ -87,6 +87,7 @@ class _RenderableCache:
         "all_stamps",
         "all_update_always",
         "all_wobjects",
+        "always_rows",
         "collect_states",
         "dist_no_camera",
         "group_order",
@@ -95,6 +96,8 @@ class _RenderableCache:
         "render_order",
         "render_queue",
         "sign",
+        "swept_root",
+        "swept_root_modified",
         "version",
         "weighted",
         "wobjects",
@@ -169,20 +172,38 @@ class _RenderableCache:
         self.all_update_always = [
             w._update_object_every_frame for w in self.all_wobjects
         ]
+        self.always_rows = [i for i, a in enumerate(self.all_update_always) if a]
+        # The root transform's ``subtree_modified`` at the last full sweep
+        self.swept_root = None
+        self.swept_root_modified = None
         return self
 
-    def update_objects(self, object_count, need_pos):
+    def update_objects(self, object_count, root):
         """Per-frame sweep over every visible object: assign renderer-ids to
         new objects and run ``_update_object`` for those whose transform
         changed since last frame (and always for classes that override it),
         refreshing cached renderable positions in the same pass. Returns the
-        new ``object_count``."""
+        new ``object_count``.
+
+        ``root`` is the root of the scene's transform tree. When its
+        ``subtree_modified`` stamp is unchanged since the last sweep, no
+        transform in the tree changed, so only the always-updated objects are
+        visited.
+        """
+        root_modified = root.subtree_modified
+        if root is self.swept_root and root_modified == self.swept_root_modified:
+            rows = self.always_rows
+        else:
+            rows = range(len(self.all_wobjects))
+            # Read before the sweep: changes made during it are seen next time
+            self.swept_root = root
+            self.swept_root_modified = root_modified
         stamps = self.all_stamps
-        rows = self.all_renderable_row
+        renderable_rows = self.all_renderable_row
         positions = self.positions
         allw = self.all_wobjects
         always = self.all_update_always
-        for i in range(len(allw)):
+        for i in rows:
             wobject = allw[i]
             if wobject._renderer_id == 0:
                 object_count += 1
@@ -191,10 +212,11 @@ class _RenderableCache:
             if lm != stamps[i] or always[i]:
                 wobject._update_object()
                 stamps[i] = lm
-                if need_pos:
-                    r = rows[i]
-                    if r >= 0:
-                        positions[r] = wobject.world.position
+                # Always refresh: the stamp is now current, so a later frame
+                # that does need positions would not refresh it.
+                r = renderable_rows[i]
+                if r >= 0:
+                    positions[r] = wobject.world.position
         return object_count
 
 
@@ -297,7 +319,9 @@ class FlatScene:
         # assign renderer-ids to new objects and run ``_update_object`` for
         # those whose transform changed (and always for classes that override
         # it), refreshing cached renderable positions in the same sweep.
-        self.object_count = cache.update_objects(self.object_count, need_pos)
+        self.object_count = cache.update_objects(
+            self.object_count, scene.world.get_root()
+        )
 
         # Shadow casters (objects with cast_shadow and a geometry).
         shadow_objects = self.shadow_objects

@@ -302,3 +302,60 @@ def test_draw_skips_state_already_set_on_the_pass():
         "set_bind_group",
         "draw",
     ]
+
+
+def _uniform_x(ob):
+    # x translation of the world transform as synced to the uniform buffer
+    return float(ob.uniform_buffer.data["world_transform"][3][0])
+
+
+def test_flatscene_sweep_skips_only_when_nothing_moved():
+    # When no transform in the scene changed, the per-frame sweep skips the
+    # objects; any change (also via a parent, or after skipped frames) must
+    # still reach the object's uniform buffer.
+    scene = gfx.Scene()
+    group = gfx.Group()
+    ob = _pts()
+    group.add(ob)
+    scene.add(group)
+    count = FlatScene(scene, None, 0).object_count
+    count = FlatScene(scene, None, count).object_count  # nothing moved: skip
+    assert _uniform_x(ob) == 0.0
+
+    ob.local.x = 3.0
+    count = FlatScene(scene, None, count).object_count
+    assert _uniform_x(ob) == 3.0
+
+    count = FlatScene(scene, None, count).object_count  # skip again
+    group.local.x = 10.0  # moves ob through its parent
+    count = FlatScene(scene, None, count).object_count
+    assert _uniform_x(ob) == 13.0
+
+    # A camera outside the scene moving does not force a sweep, but a moved
+    # object is still picked up in the same frame.
+    cam = gfx.PerspectiveCamera(70, 1)
+    cam.local.z = 50
+    ob.local.x = 5.0
+    FlatScene(scene, cam.view_matrix, count)
+    assert _uniform_x(ob) == 15.0
+
+
+def test_flatscene_positions_fresh_after_render_without_camera():
+    # A render without a camera (sort_objects=False) syncs moved objects; the
+    # cached positions used for depth sorting must be refreshed then too.
+    scene = gfx.Scene()
+    a = _pts(material=gfx.PointsMaterial(alpha_mode="blend"))
+    b = _pts(material=gfx.PointsMaterial(alpha_mode="blend"))
+    a.local.position = (0, 0, 0)
+    b.local.position = (0, 0, 5)
+    scene.add(a, b)
+    cam = gfx.PerspectiveCamera(70, 1)
+    cam.local.position = (0, 0, 20)
+    cam.look_at((0, 0, 0))
+    assert _order(scene, cam.view_matrix) == _reference(scene, cam.view_matrix)
+
+    a.local.z = 10  # a is now in front of b
+    FlatScene(scene, None)  # render without camera syncs the move
+    order = _order(scene, cam.view_matrix)
+    assert order == _reference(scene, cam.view_matrix)
+    assert order == [b, a]  # blended: back to front

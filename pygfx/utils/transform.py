@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import numpy as np
 import pylinalg as la
+import itertools
 from time import perf_counter_ns
 
 from typing import Any, Tuple, Union
+
+# Unique, increasing stamps for ``RecursiveTransform.subtree_modified``. A
+# counter rather than the clock, so that two changes never share a stamp.
+next_modification_stamp = itertools.count(1).__next__
 
 
 PRECISION_EPSILON = 1e-7
@@ -539,6 +544,7 @@ class AffineTransform(AffineBase):
         self.last_modified = last_modified
         if wrapper := self._wrapper:
             wrapper.flag_update(last_modified)
+            wrapper._mark_root_modified()
 
     def _set_wrapper(self, wrapper: RecursiveTransform):
         self._wrapper = wrapper
@@ -810,6 +816,7 @@ class RecursiveTransform(AffineBase):
         "children",
         "last_modified",
         "own",
+        "subtree_modified",
     )
 
     def __init__(
@@ -823,6 +830,10 @@ class RecursiveTransform(AffineBase):
     ) -> None:
         super().__init__(reference_up=reference_up, is_camera_space=is_camera_space)
         self.last_modified = perf_counter_ns()
+        # Only meaningful on a root (a transform without parent): a stamp
+        # that changes whenever any transform in its tree changes. Lets a
+        # renderer skip checking every object when nothing moved.
+        self.subtree_modified = next_modification_stamp()
         self._parent = parent
         self.children = []
         self.own = base
@@ -833,7 +844,9 @@ class RecursiveTransform(AffineBase):
         # note: this function has been heavily micro-optimized
         # please don't modify it carelessly
         if last_modified is None:
+            # A direct call (not propagation from a parent or own transform)
             last_modified = perf_counter_ns()
+            self._mark_root_modified()
         self.last_modified = last_modified
         if children := self.children:
             for child in children:
@@ -841,6 +854,20 @@ class RecursiveTransform(AffineBase):
                     child.flag_update(last_modified)
                 else:
                     child.last_modified = last_modified
+
+    def _mark_root_modified(self):
+        """Give the root of this transform's tree a new ``subtree_modified`` stamp."""
+        node = self
+        while (parent := node._parent) is not None:
+            node = parent
+        node.subtree_modified = next_modification_stamp()
+
+    def get_root(self) -> RecursiveTransform:
+        """The transform at the top of this transform's tree."""
+        node = self
+        while (parent := node._parent) is not None:
+            node = parent
+        return node
 
     @cached
     def _computed_parent_reference_up(self) -> np.ndarray:
