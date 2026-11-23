@@ -27,6 +27,7 @@ from ....resources import Texture
 from ....resources._base import resource_update_registry
 from ....utils import Color
 from ....utils.enums import PixelFilter
+from ....utils.trackable import dirty_trackers
 from ... import Renderer
 from .blender import Blender
 from .effectpasses import DDAAPass, EffectPass, FXAAPass, OutputPass, PPAAPass
@@ -86,6 +87,7 @@ class _RenderableCache:
         "all_stamps",
         "all_update_always",
         "all_wobjects",
+        "collect_states",
         "dist_no_camera",
         "group_order",
         "has_weighted",
@@ -102,6 +104,7 @@ class _RenderableCache:
     @classmethod
     def build(cls, scene, scene_visible, index):
         self = cls()
+        self.collect_states = []
         renderables = []
         if scene_visible and scene._renderable_in_index:
             renderables.append(scene)
@@ -199,6 +202,8 @@ class FlatScene:
     def __init__(self, scene, view_matrix=None, object_count=0):
         self._view_matrix = view_matrix
         self._wobject_wrappers = []  # WobjectWrapper's
+        self._collect_states = None  # list of _CollectState, shared via the cache
+        self._pass_lists = None
         self._sort_arrays = None  # (render_queue, group_order, render_order, dist)
         self.lights = {
             "point_lights": [],
@@ -303,6 +308,7 @@ class FlatScene:
                 shadow_objects.append(wobject)
 
         self._wobject_wrappers = cache.wrappers
+        self._collect_states = cache.collect_states
         if not cache.wobjects:
             self._sort_arrays = None
             return
@@ -336,10 +342,31 @@ class FlatScene:
 
     def collect_pipelines_container_groups(self, renderstate):
         """Select and resolve the pipeline, compiling shaders, building pipelines and composing binding as needed."""
+        wrappers = self._wobject_wrappers
+        states = self._collect_states
+        if states is not None:
+            # Fast path: the same draw list as a previous frame, none of its
+            # pipeline container groups has pending changes (their trackers
+            # are not dirty), and no pipeline container group anywhere changed
+            # since then. The previous result is then still exact.
+            epoch = _pipeline.PIPELINE_EPOCH
+            for state in states:
+                if (
+                    state.renderstate is renderstate
+                    and state.epoch == epoch
+                    and state.wrappers == wrappers
+                    and state.trackers.isdisjoint(dirty_trackers)
+                ):
+                    self._compute_pipeline_containers = state.compute_containers
+                    self._bake_functions = state.bake_functions
+                    self._pass_lists = state.pass_lists
+                    return
+
         self._compute_pipeline_containers = compute_pipeline_containers = []
         self._bake_functions = bake_functions = []
+        self._pass_lists = None
         scene = self.scene
-        for wrapper in self._wobject_wrappers:
+        for wrapper in wrappers:
             wobject = wrapper.wobject
             material = wobject._material
             container_group = wrapper.pcg
@@ -363,6 +390,19 @@ class FlatScene:
             for func in container_group.bake_functions:
                 bake_functions.append((wobject, func))
 
+        if states is not None:
+            # Remember the result for the next frames (a few, e.g. one per view)
+            state = _CollectState()
+            state.renderstate = renderstate
+            state.epoch = _pipeline.PIPELINE_EPOCH
+            state.wrappers = list(wrappers)
+            state.trackers = {w.pcg.tracker for w in wrappers}
+            state.compute_containers = compute_pipeline_containers
+            state.bake_functions = bake_functions
+            state.pass_lists = self._pass_lists = self._build_pass_lists()
+            states.insert(0, state)
+            del states[4:]
+
     def call_bake_functions(self, camera, logical_size):
         """Call any collected bake functions."""
         # Enable pipelines to update data on the CPU. This usually includes
@@ -378,17 +418,41 @@ class FlatScene:
 
     def iter_render_pipelines_per_pass_type(self):
         """Generator that yields (pass_type, wobjects), with pass_type 'opaque', 'transparency' or 'weighted'."""
+        pass_lists = getattr(self, "_pass_lists", None)
+        if pass_lists is None:
+            pass_lists = self._build_pass_lists()
+        yield from pass_lists
+
+    def _build_pass_lists(self):
+        """The render pipeline containers grouped in consecutive runs of the same pass type."""
+        result = []
         current_pass_type = ""
         current_pipeline_containers = []
         for wrapper in self._wobject_wrappers:
             if wrapper.pass_type != current_pass_type:
                 if current_pipeline_containers:
-                    yield (current_pass_type, current_pipeline_containers)
+                    result.append((current_pass_type, current_pipeline_containers))
                 current_pass_type = wrapper.pass_type
                 current_pipeline_containers = []
             current_pipeline_containers.extend(wrapper.render_containers)
         if current_pipeline_containers:
-            yield (current_pass_type, current_pipeline_containers)
+            result.append((current_pass_type, current_pipeline_containers))
+        return result
+
+
+class _CollectState:
+    """The result of ``FlatScene.collect_pipelines_container_groups`` for one
+    draw list, kept on the scene's renderable cache for reuse."""
+
+    __slots__ = [
+        "bake_functions",
+        "compute_containers",
+        "epoch",
+        "pass_lists",
+        "renderstate",
+        "trackers",
+        "wrappers",
+    ]
 
 
 class WgpuRenderer(RootEventHandler, Renderer):
@@ -1237,10 +1301,15 @@ class WgpuRenderer(RootEventHandler, Renderer):
         )
         bundles = self._render_bundles
         entry = bundles.get(key)
-        if entry is None or entry[0] != signature or entry[1] != containers:
+        if (
+            entry is None
+            or entry[0] != signature
+            or (entry[1] is not containers and entry[1] != containers)
+        ):
             # New or changed draw list: draw directly, remember it.
             bundles.pop(key, None)
-            bundles[key] = [signature, list(containers), None]
+            # The list is not mutated afterwards, so keep it (cheap identity check)
+            bundles[key] = [signature, containers, None]
             while len(bundles) > 64:
                 bundles.pop(next(iter(bundles)))
             return None

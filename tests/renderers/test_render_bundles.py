@@ -6,6 +6,8 @@ on every frame. Each frame applies a change that a stale bundle would get
 wrong.
 """
 
+import itertools
+
 import numpy as np
 import pytest
 import wgpu
@@ -19,7 +21,9 @@ if not can_use_wgpu_lib:
 
 
 def _tile(x, y, value, size=8):
-    data = np.full((size, size), value, np.uint8)
+    # A pattern (not a flat color), so that interpolation changes are visible
+    data = (np.arange(size * size).reshape(size, size) * 7 + value) % 256
+    data = data.astype(np.uint8)
     ob = gfx.Image(
         gfx.Geometry(grid=gfx.Texture(data, dim=2)),
         gfx.ImageBasicMaterial(clim=(0, 255)),
@@ -149,3 +153,84 @@ def test_render_bundles_skip_passes_with_a_stencil_reference():
     h, w = bundled[-1].shape[:2]
     assert bundled[-1][h // 2, w // 4, 0] > 200  # reader drawn where marked
     assert bundled[-1][h // 2, 3 * w // 4, 0] < 50
+
+
+def _pipeline_changes(scene, tiles, mesh, camera):
+    """Visible changes that need new pipelines, shaders or bind groups. Each
+    change is followed by an unchanged frame, so the cached paths are used."""
+    yield
+    yield
+    tiles[0].material.interpolation = "linear"  # new shader
+    yield
+    yield
+    mesh.material.wireframe = True  # new shader and topology
+    yield
+    yield
+    tiles[4].material.map = gfx.cm.viridis  # adds a colormap: new shader
+    yield
+    yield
+    tiles[4].material.map = gfx.cm.plasma  # other colormap: new bind group
+    yield
+    yield
+    tiles[1].geometry.grid = gfx.Texture(np.full((8, 8), 30, np.uint8), dim=2)
+    yield
+    yield
+    tiles[2].material = gfx.ImageBasicMaterial(clim=(0, 50))  # material swap
+    yield
+    yield
+    tiles[3].render_order = -1  # draw order
+    yield
+    yield
+    mesh.material.wireframe = False
+    tiles[0].material.interpolation = "nearest"  # back again
+    yield
+    yield
+
+
+def _render_frame(renderer, scene, camera, overview):
+    renderer.render(scene, camera, rect=(0, 0, 100, 60), flush=False)
+    renderer.render(scene, overview, rect=(0, 0, 30, 20), flush=False)
+    renderer.flush()
+    return renderer.snapshot().copy()
+
+
+def test_cached_frames_match_a_fresh_renderer():
+    # A long-lived renderer reuses per-frame results (collected pipelines,
+    # pass lists, bundles) while nothing changed. After every change it must
+    # draw exactly what an uncached render of the same state draws. The
+    # reference for frame i is a brand-new scene, with the first i changes
+    # replayed, rendered by a brand-new renderer: no object, pipeline group or
+    # cache is shared with the long-lived run.
+    def new_renderer():
+        texture = gfx.Texture(dim=2, size=(100, 60, 1), format="rgba8unorm-srgb")
+        return gfx.renderers.WgpuRenderer(texture)
+
+    def new_overview():
+        # Looks from behind, so its depth order (and thus its draw list)
+        # differs from the main view: each view has its own cached state.
+        overview = gfx.OrthographicCamera(60, 40)
+        overview.local.position = (20, 10, -10)
+        overview.look_at((20, 10, 0))
+        return overview
+
+    # Long-lived run
+    scene, tiles, mesh, camera = _build()
+    overview = new_overview()
+    renderer = new_renderer()
+    cached = [
+        _render_frame(renderer, scene, camera, overview)
+        for _ in _pipeline_changes(scene, tiles, mesh, camera)
+    ]
+
+    # Reference: rebuild and replay for every frame
+    for i, image in enumerate(cached):
+        scene, tiles, mesh, camera = _build()
+        changes = _pipeline_changes(scene, tiles, mesh, camera)
+        for _ in range(i + 1):
+            next(changes)
+        reference = _render_frame(new_renderer(), scene, camera, new_overview())
+        assert np.array_equal(image, reference), f"frame {i} differs"
+
+    # The changes must be visible, or this test would not detect anything
+    n_changed = sum(not np.array_equal(a, b) for a, b in itertools.pairwise(cached))
+    assert n_changed >= 7
