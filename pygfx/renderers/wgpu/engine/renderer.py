@@ -31,7 +31,7 @@ from ... import Renderer
 from .blender import Blender
 from .effectpasses import DDAAPass, EffectPass, FXAAPass, OutputPass, PPAAPass
 from .mipmapsutil import generate_texture_mipmaps
-from .pipeline import get_pipeline_container_group
+from .pipeline import RenderPassState, get_pipeline_container_group
 from .renderstate import get_renderstate
 from .shadowutil import render_shadow_maps
 from .shared import get_shared
@@ -44,13 +44,27 @@ logger = logging.getLogger("pygfx")
 class WobjectWrapper:
     """To temporary wrap each wobject for each draw."""
 
-    __slots__ = ["pass_type", "render_containers", "sort_key", "wobject"]
+    __slots__ = [
+        "pass_type",
+        "pcg",
+        "pcg_material",
+        "pcg_renderstate",
+        "render_containers",
+        "sort_key",
+        "wobject",
+    ]
 
     def __init__(self, wobject, sort_key, pass_type):
         self.wobject = wobject
         self.sort_key = sort_key
         self.pass_type = pass_type
         self.render_containers = None
+        # The pipeline container group last used for this wrapper, and the
+        # renderstate and material it belongs to. Wrappers are cached across
+        # frames, so the lookup is skipped while these stay the same.
+        self.pcg = None
+        self.pcg_material = None
+        self.pcg_renderstate = None
 
 
 class _RenderableCache:
@@ -323,14 +337,30 @@ class FlatScene:
         """Select and resolve the pipeline, compiling shaders, building pipelines and composing binding as needed."""
         self._compute_pipeline_containers = compute_pipeline_containers = []
         self._bake_functions = bake_functions = []
+        scene = self.scene
         for wrapper in self._wobject_wrappers:
-            container_group = get_pipeline_container_group(
-                wrapper.wobject, self.scene, renderstate
-            )
-            compute_pipeline_containers.extend(container_group.compute_containers)
+            wobject = wrapper.wobject
+            material = wobject._material
+            container_group = wrapper.pcg
+            if (
+                container_group is not None
+                and wrapper.pcg_renderstate is renderstate
+                and wrapper.pcg_material is material
+            ):
+                # Same group as last frame; only check it for changes.
+                container_group.update(wobject, scene, renderstate)
+            else:
+                container_group = get_pipeline_container_group(
+                    wobject, scene, renderstate
+                )
+                wrapper.pcg = container_group
+                wrapper.pcg_renderstate = renderstate
+                wrapper.pcg_material = material
+            if container_group.compute_containers:
+                compute_pipeline_containers.extend(container_group.compute_containers)
             wrapper.render_containers = container_group.render_containers
             for func in container_group.bake_functions:
-                bake_functions.append((wrapper.wobject, func))
+                bake_functions.append((wobject, func))
 
     def call_bake_functions(self, camera, logical_size):
         """Call any collected bake functions."""
@@ -1131,8 +1161,9 @@ class WgpuRenderer(RootEventHandler, Renderer):
 
             render_pass.set_viewport(*physical_viewport)
 
+            pass_state = RenderPassState()
             for render_pipeline_container in render_pipeline_containers:
-                render_pipeline_container.draw(render_pass, renderstate)
+                render_pipeline_container.draw(render_pass, renderstate, pass_state)
 
             render_pass.end()
 

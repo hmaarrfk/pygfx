@@ -245,3 +245,60 @@ def test_flatscene_cache_invalidates_on_mutation():
     scene.add(g)
     g.add(scene.children[0])
     check("after reparent into group")
+
+
+def test_draw_skips_state_already_set_on_the_pass():
+    # Consecutive draws in one render pass must not set the pipeline, bind
+    # groups or stencil reference again when they did not change.
+    from pygfx.renderers.wgpu.engine.pipeline import (
+        RenderPassState,
+        RenderPipelineContainer,
+    )
+
+    class FakePass:
+        def __init__(self):
+            self.calls = []
+
+        def __getattr__(self, name):
+            return lambda *args: self.calls.append((name, args[0]))
+
+    class FakeRenderState:
+        wgpu_bind_group = "rs_bg"
+
+    def container(pipeline, bind_groups, stencil_value=0):
+        c = RenderPipelineContainer.__new__(RenderPipelineContainer)
+        c.broken = False
+        c.wgpu_pipeline = pipeline
+        c.wgpu_bind_groups = bind_groups
+        c.wobject_info = {"stencil_value": stencil_value}
+        c.render_info = {"indices": (1, 1, 0, 0)}
+        return c
+
+    rp, rs, state = FakePass(), FakeRenderState(), RenderPassState()
+    container("p1", ["bg_a"]).draw(rp, rs, state)
+    container("p1", ["bg_b"]).draw(rp, rs, state)
+    container("p2", ["bg_b"], stencil_value=3).draw(rp, rs, state)
+    container("p2", ["bg_b"], stencil_value=3).draw(rp, rs, state)
+    assert rp.calls == [
+        ("set_pipeline", "p1"),
+        ("set_bind_group", 0),
+        ("set_bind_group", 1),
+        ("draw", 1),
+        ("set_bind_group", 0),
+        ("draw", 1),
+        ("set_pipeline", "p2"),
+        ("set_stencil_reference", 3),
+        ("draw", 1),
+        ("draw", 1),
+    ]
+
+    # Without a pass state, everything is set (backwards compatible).
+    rp = FakePass()
+    container("p1", ["bg_a"]).draw(rp, rs)
+    assert [c[0] for c in rp.calls] == [
+        "set_pipeline",
+        "set_stencil_reference",
+        "set_bind_group",
+        "set_bind_group",
+        "draw",
+    ]
