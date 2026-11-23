@@ -19,6 +19,12 @@ from .utils import GpuCache, hash_from_value, registry
 
 PIPELINE_CONTAINER_GROUPS = WeakAssociativeContainer()
 
+# Incremented whenever any PipelineContainerGroup updates its containers
+# (new pipelines, bind groups, render info, ...). The renderer uses it to
+# know that a recorded render bundle may be stale. Read it as
+# ``pipeline.PIPELINE_EPOCH`` (module attribute), not via ``from ... import``.
+PIPELINE_EPOCH = 0
+
 # These caches use an LRU strategy.
 # They store a limited number of recently used GPU resources to improve cache hit rates.
 # This enables reuse of GPU resources across similar objects, reducing the overhead of
@@ -161,6 +167,21 @@ def get_cached_render_pipeline(device, *args):
     return result
 
 
+class RenderPassState:
+    """The state already set on one render pass, so that consecutive draws
+    can skip setting it again. A new render pass has no pipeline or bind
+    groups set and a stencil reference of 0 (per the WebGPU spec), so create
+    a fresh one for every pass."""
+
+    __slots__ = ["bind_groups", "pipeline", "stencil_reference"]
+
+    def __init__(self):
+        self.pipeline = None
+        self.stencil_reference = 0
+        # One slot per bind group index; WebGPU allows at most a handful
+        self.bind_groups = [None] * 16
+
+
 def get_pipeline_container_group(wobject, scene, renderstate):
     """Return the PipelineContainerGroup object for wobject.
 
@@ -221,6 +242,9 @@ class PipelineContainerGroup:
 
         if not changed:
             return
+
+        global PIPELINE_EPOCH
+        PIPELINE_EPOCH += 1
 
         if "create" in changed:
             self.compute_containers = ()
@@ -652,29 +676,43 @@ class RenderPipelineContainer(PipelineContainer):
             color_descriptors,
         )
 
-    def draw(self, render_pass, renderstate):
-        """Draw the pipeline, doing the actual rendering job."""
+    def draw(self, render_pass, renderstate, pass_state=None):
+        """Draw the pipeline, doing the actual rendering job.
+
+        ``pass_state`` is an optional ``RenderPassState`` shared by all draws in
+        one render pass; with it, state that is already set on the pass (the
+        pipeline, bind groups, stencil reference) is not set again.
+        """
         if self.broken:
             return
+        if pass_state is None:
+            # Unknown pass state: set everything, as before pass_state existed
+            pass_state = RenderPassState()
+            pass_state.stencil_reference = None
 
-        # Collect what's needed
+        # Set pipeline and bindings, skipping what the pass already has
         pipeline = self.wgpu_pipeline
-        indices = self.render_info["indices"]
-        bind_groups = self.wgpu_bind_groups
+        if pipeline is not pass_state.pipeline:
+            render_pass.set_pipeline(pipeline)
+            pass_state.pipeline = pipeline
 
-        # Set pipeline and bindings
-        render_pass.set_pipeline(pipeline)
-        render_pass.set_stencil_reference(self.wobject_info["stencil_value"])
+        stencil_value = self.wobject_info["stencil_value"]
+        if stencil_value != pass_state.stencil_reference:
+            render_pass.set_stencil_reference(stencil_value)
+            pass_state.stencil_reference = stencil_value
 
-        for bind_group_id, bind_group in enumerate(bind_groups):
-            render_pass.set_bind_group(bind_group_id, bind_group, [], 0, 99)
-
-        renderstate_bind_group_id = len(bind_groups)
+        bound = pass_state.bind_groups
+        n = 0
+        for bind_group in self.wgpu_bind_groups:
+            if bound[n] is not bind_group:
+                render_pass.set_bind_group(n, bind_group, [], 0, 99)
+                bound[n] = bind_group
+            n += 1
         renderstate_bind_group = renderstate.wgpu_bind_group
-        render_pass.set_bind_group(
-            renderstate_bind_group_id, renderstate_bind_group, [], 0, 99
-        )
+        if bound[n] is not renderstate_bind_group:
+            render_pass.set_bind_group(n, renderstate_bind_group, [], 0, 99)
+            bound[n] = renderstate_bind_group
 
         # Draw!
         # draw(count_vertex, count_instance, first_vertex, first_instance)
-        render_pass.draw(*indices)
+        render_pass.draw(*self.render_info["indices"])

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import weakref
 from typing import TYPE_CHECKING
 
 import wgpu
@@ -169,6 +170,12 @@ class Material(Trackable):
         stencil_value: int = 0,
     ):
         super().__init__()
+
+        # World objects that use this material, so an in-place change to
+        # render_queue / alpha_method can invalidate their scenes' render
+        # caches. Weak so it never keeps objects alive. Initialised before any
+        # property setter below can call ``_derive_render_queue``.
+        self._users = weakref.WeakSet()
 
         self._store.uniform_buffer = Buffer(
             array_from_shadertype(self.uniform_type), force_contiguous=True
@@ -613,6 +620,20 @@ class Material(Trackable):
             else:  # alpha_method in ["blended", "weighted"]
                 render_queue = 3000
         self._render_queue = render_queue
+        # render_queue / alpha_method feed FlatScene sort keys; invalidate the
+        # render cache of every scene this material is used in.
+        for wobject in self._users:
+            wobject._bump_render_version()
+
+    def _register_user(self, wobject) -> None:
+        """Called by ``WorldObject.material`` setter when this material is
+        assigned to ``wobject``."""
+        self._users.add(wobject)
+
+    def _unregister_user(self, wobject) -> None:
+        """Called by ``WorldObject.material`` setter when this material is
+        replaced on ``wobject``."""
+        self._users.discard(wobject)
 
     def _get_alpha_config_options(
         self, method: str, keys: list, default_dict: dict, given_dict: dict
@@ -794,10 +815,12 @@ class Material(Trackable):
     @property
     def stencil_value(self) -> int:
         """Defines the reference stencil value for this object. Default 0."""
-        return self._stencil_value
+        return self._store.stencil_value
 
     @stencil_value.setter
     def stencil_value(self, value: int):
-        self._stencil_value = int(value)  # applied at each draw, so not saved on store
+        # Kept on the store so a change is tracked: the renderer reads it into
+        # the render info, which is then refreshed (no pipeline rebuild needed).
+        self._store.stencil_value = int(value)
 
     # NOTE: we have not implemented read_mask and write_mask yet; they are assumed 0xff for now

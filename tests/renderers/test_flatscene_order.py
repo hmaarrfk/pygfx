@@ -1,0 +1,401 @@
+"""FlatScene must present renderables (and lights/shadow casters) in the same
+order the historical depth-first walk produced. This guards the incremental
+index and the vectorized depth-sort against ordering regressions.
+
+The reference here is computed independently (a from-scratch DFS + the
+renderer's sort-key formula), so it validates whatever FlatScene does
+internally. Pure CPU; no GPU/adapter needed.
+"""
+
+import numpy as np
+import pylinalg as la
+import pygfx as gfx
+from pygfx.renderers.wgpu.engine.renderer import FlatScene
+
+
+def _is_group(o):
+    return getattr(type(o), "_subtree_is_group", False)
+
+
+def _reference(scene, view_matrix):
+    renderables = []
+
+    def sort_key(o, group_ro):
+        m = o._material
+        rq = m.render_queue
+        sign = 1 if 1500 < rq <= 2500 else -1
+        if m.alpha_method == "weighted":
+            df = 0
+        elif view_matrix is None:
+            df = -1
+        else:
+            rel = la.vec_transform(o.world.position, view_matrix, projection=False)
+            df = float(-rel[2]) * sign
+        return (rq, group_ro, o.render_order, df)
+
+    def visit(o, group_ro):
+        if o._material is not None:
+            renderables.append((o, sort_key(o, group_ro)))
+        child_ro = o.render_order if _is_group(o) else group_ro
+        for c in o._children:
+            if c._store.visible:
+                visit(c, child_ro)
+
+    if scene._store.visible:
+        sgr = scene.render_order if _is_group(scene) else 0
+        for c in scene._children:
+            if c._store.visible:
+                visit(c, sgr)
+    renderables.sort(key=lambda t: t[1])  # stable
+    return [o for o, _ in renderables]
+
+
+def _pts(**kw):
+    p = gfx.Points(
+        gfx.Geometry(positions=np.random.rand(1, 3).astype("float32")),
+        gfx.PointsMaterial(),
+    )
+    for k, v in kw.items():
+        setattr(p, k, v)
+    return p
+
+
+def _cameras():
+    a = gfx.PerspectiveCamera(70, 1)
+    a.local.position = (3, 4, 12)
+    a.show_pos((0, 0, 0))
+    b = gfx.OrthographicCamera(10, 10)
+    b.local.position = (-2, 1, 8)
+    b.show_pos((0, 0, 0))
+    return {"none": None, "persp": a.view_matrix, "ortho": b.view_matrix}
+
+
+def _scenes():
+    rng = np.random.default_rng(1)
+    scenes = {}
+
+    s = gfx.Scene()
+    s.add(gfx.AmbientLight(), gfx.DirectionalLight())
+    for i in range(40):
+        p = _pts(render_order=i % 3)
+        p.local.position = rng.uniform(-5, 5, 3)
+        s.add(p)
+    s.children[10].visible = False
+    scenes["flat_varied"] = s
+
+    s = gfx.Scene()
+    g1, g2, g3 = gfx.Group(), gfx.Group(), gfx.Group()
+    g1.render_order, g2.render_order, g3.render_order = 5, 1, 3
+    s.add(g1, g2, g3)
+    for g in (g2, g1, g3):  # fill out of DFS-tail order
+        for _ in range(8):
+            p = _pts()
+            p.local.position = rng.uniform(-5, 5, 3)
+            g.add(p)
+    g2.visible = False
+    scenes["grouped_reordered"] = s
+
+    s = gfx.Scene()
+    s.add(gfx.AmbientLight())
+    for i in range(30):
+        p = _pts(render_order=i % 2)
+        p.local.position = rng.uniform(-5, 5, 3)
+        if i % 2 == 0:
+            p.material.alpha_mode = "weighted_blend"
+        s.add(p)
+    scenes["weighted_mix"] = s
+
+    return scenes
+
+
+def _order(scene, vm):
+    flat = FlatScene(scene, vm)
+    flat.sort()
+    return [w.wobject for w in flat._wobject_wrappers]
+
+
+def test_flatscene_renderable_order_matches_reference():
+    for sname, scene in _scenes().items():
+        for cname, vm in _cameras().items():
+            assert _order(scene, vm) == _reference(scene, vm), f"{sname}/{cname}"
+
+
+def test_flatscene_renderer_ids_assigned_and_stable():
+    # Renderer-ids (used for picking) must be unique and non-zero for every
+    # visible object, stay stable across frames, and new objects must get
+    # fresh ids — even though the per-object id pass is now cache-driven.
+    scene = gfx.Scene()
+    groups = [gfx.Group() for _ in range(3)]
+    for g in groups:
+        scene.add(g)
+    objs = [_pts() for _ in range(20)]
+    for i, o in enumerate(objs):
+        groups[i % 3].add(o)
+
+    flat = FlatScene(scene, None, 0)
+    everyone = [scene, *groups, *objs]
+    ids = [o._renderer_id for o in everyone]
+    assert all(i > 0 for i in ids)
+    assert len(set(ids)) == len(ids)
+
+    old = {o: o._renderer_id for o in everyone}
+    new = _pts()
+    scene.add(new)
+    flat2 = FlatScene(scene, None, flat.object_count)
+    assert new._renderer_id > 0
+    assert new._renderer_id not in old.values()
+    assert all(o._renderer_id == old[o] for o in everyone)
+
+    # A moved object must have its transform refreshed (uniform synced).
+    objs[0].local.x = 99.0
+    cam = gfx.PerspectiveCamera(70, 1)
+    cam.local.position = (0, 0, 10)
+    cam.show_pos((0, 0, 0))
+    FlatScene(scene, cam.view_matrix, flat2.object_count)
+    assert abs(objs[0].world.position[0] - 99.0) < 1e-6
+
+
+def test_flatscene_update_object_overrides_run_every_frame():
+    # The per-frame sweep skips ``_update_object`` for objects that did not
+    # move, but subclasses that override it do per-draw work unrelated to
+    # their own transform (skinning, light helpers, text layout). Those must
+    # still be updated every frame, as before the render cache existed.
+    calls = []
+
+    class Custom(gfx.Points):
+        def _update_object(self):
+            super()._update_object()
+            calls.append(self)
+
+    scene = gfx.Scene()
+    custom = Custom(
+        gfx.Geometry(positions=np.zeros((1, 3), np.float32)), gfx.PointsMaterial()
+    )
+    still = _pts()
+    scene.add(custom, still)
+    assert Custom._update_object_every_frame
+    assert not type(still)._update_object_every_frame
+
+    count = 0
+    for _ in range(3):
+        count = FlatScene(scene, None, count).object_count
+    assert len(calls) == 3  # no transform change, still called every frame
+
+    # Same for a light helper: its color follows the light without it moving.
+    light = gfx.PointLight("#ff0000")
+    helper = gfx.PointLightHelper()
+    light.add(helper)
+    scene.add(light)
+    count = FlatScene(scene, None, count).object_count
+    light.color = "#00ff00"
+    FlatScene(scene, None, count)
+    assert helper.material.color == light.color
+
+
+def test_flatscene_cache_invalidates_on_mutation():
+    # FlatScene caches camera-independent structure across frames; every
+    # mutation that changes the renderable set or sort keys must invalidate it.
+    cam = gfx.PerspectiveCamera(70, 1)
+    cam.local.position = (0, 0, 30)
+    cam.show_pos((0, 0, 0))
+    vm = cam.view_matrix
+
+    scene = gfx.Scene()
+    for i in range(12):
+        p = _pts(render_order=0)
+        p.local.position = (i - 6, 0, 0)
+        scene.add(p)
+
+    def check(msg):
+        assert _order(scene, vm) == _reference(scene, vm), msg
+
+    check("initial")
+
+    # add a renderable
+    extra = _pts(render_order=0)
+    extra.local.position = (0.5, 0, 0)
+    scene.add(extra)
+    check("after add")
+
+    # remove a renderable
+    scene.remove(scene.children[3])
+    check("after remove")
+
+    # toggle visibility
+    scene.children[2].visible = False
+    check("after hide")
+    scene.children[2].visible = True
+    check("after show")
+
+    # change render_order (reorders within the queue)
+    scene.children[5].render_order = 10
+    check("after render_order")
+
+    # change material in place (alters render_queue / alpha_method)
+    scene.children[1].material.alpha_mode = "weighted_blend"
+    check("after material alpha change")
+
+    # move an object: depth changes, positions must refresh (no epoch bump)
+    scene.children[4].local.position = (0, 0, -50)
+    check("after move")
+
+    # reparent under a group with a render_order (group_order changes)
+    g = gfx.Group()
+    g.render_order = 7
+    scene.add(g)
+    g.add(scene.children[0])
+    check("after reparent into group")
+
+
+def test_draw_skips_state_already_set_on_the_pass():
+    # Consecutive draws in one render pass must not set the pipeline, bind
+    # groups or stencil reference again when they did not change.
+    from pygfx.renderers.wgpu.engine.pipeline import (
+        RenderPassState,
+        RenderPipelineContainer,
+    )
+
+    class FakePass:
+        def __init__(self):
+            self.calls = []
+
+        def __getattr__(self, name):
+            return lambda *args: self.calls.append((name, args[0]))
+
+    class FakeRenderState:
+        wgpu_bind_group = "rs_bg"
+
+    def container(pipeline, bind_groups, stencil_value=0):
+        c = RenderPipelineContainer.__new__(RenderPipelineContainer)
+        c.broken = False
+        c.wgpu_pipeline = pipeline
+        c.wgpu_bind_groups = bind_groups
+        c.wobject_info = {"stencil_value": stencil_value}
+        c.render_info = {"indices": (1, 1, 0, 0)}
+        return c
+
+    rp, rs, state = FakePass(), FakeRenderState(), RenderPassState()
+    container("p1", ["bg_a"]).draw(rp, rs, state)
+    container("p1", ["bg_b"]).draw(rp, rs, state)
+    container("p2", ["bg_b"], stencil_value=3).draw(rp, rs, state)
+    container("p2", ["bg_b"], stencil_value=3).draw(rp, rs, state)
+    assert rp.calls == [
+        ("set_pipeline", "p1"),
+        ("set_bind_group", 0),
+        ("set_bind_group", 1),
+        ("draw", 1),
+        ("set_bind_group", 0),
+        ("draw", 1),
+        ("set_pipeline", "p2"),
+        ("set_stencil_reference", 3),
+        ("draw", 1),
+        ("draw", 1),
+    ]
+
+    # Without a pass state, everything is set (backwards compatible).
+    rp = FakePass()
+    container("p1", ["bg_a"]).draw(rp, rs)
+    assert [c[0] for c in rp.calls] == [
+        "set_pipeline",
+        "set_stencil_reference",
+        "set_bind_group",
+        "set_bind_group",
+        "draw",
+    ]
+
+
+def _uniform_x(ob):
+    # x translation of the world transform as synced to the uniform buffer
+    return float(ob.uniform_buffer.data["world_transform"][3][0])
+
+
+def test_flatscene_sweep_skips_only_when_nothing_moved():
+    # When no transform in the scene changed, the per-frame sweep skips the
+    # objects; any change (also via a parent, or after skipped frames) must
+    # still reach the object's uniform buffer.
+    scene = gfx.Scene()
+    group = gfx.Group()
+    ob = _pts()
+    group.add(ob)
+    scene.add(group)
+    count = FlatScene(scene, None, 0).object_count
+    count = FlatScene(scene, None, count).object_count  # nothing moved: skip
+    assert _uniform_x(ob) == 0.0
+
+    ob.local.x = 3.0
+    count = FlatScene(scene, None, count).object_count
+    assert _uniform_x(ob) == 3.0
+
+    count = FlatScene(scene, None, count).object_count  # skip again
+    group.local.x = 10.0  # moves ob through its parent
+    count = FlatScene(scene, None, count).object_count
+    assert _uniform_x(ob) == 13.0
+
+    # A camera outside the scene moving does not force a sweep, but a moved
+    # object is still picked up in the same frame.
+    cam = gfx.PerspectiveCamera(70, 1)
+    cam.local.z = 50
+    ob.local.x = 5.0
+    FlatScene(scene, cam.view_matrix, count)
+    assert _uniform_x(ob) == 15.0
+
+
+def test_flatscene_positions_fresh_after_render_without_camera():
+    # A render without a camera (sort_objects=False) syncs moved objects; the
+    # cached positions used for depth sorting must be refreshed then too.
+    scene = gfx.Scene()
+    a = _pts(material=gfx.PointsMaterial(alpha_mode="blend"))
+    b = _pts(material=gfx.PointsMaterial(alpha_mode="blend"))
+    a.local.position = (0, 0, 0)
+    b.local.position = (0, 0, 5)
+    scene.add(a, b)
+    cam = gfx.PerspectiveCamera(70, 1)
+    cam.local.position = (0, 0, 20)
+    cam.look_at((0, 0, 0))
+    assert _order(scene, cam.view_matrix) == _reference(scene, cam.view_matrix)
+
+    a.local.z = 10  # a is now in front of b
+    FlatScene(scene, None)  # render without camera syncs the move
+    order = _order(scene, cam.view_matrix)
+    assert order == _reference(scene, cam.view_matrix)
+    assert order == [b, a]  # blended: back to front
+
+
+def test_flatscene_visibility_changes_do_not_rebuild():
+    # Showing and hiding objects re-selects the visible subset of the cached
+    # structure instead of rebuilding it, and stays correct: an object moved
+    # while hidden is synced when shown, even if nothing else moved, and an
+    # object that starts hidden gets a renderer-id once shown.
+    scene = gfx.Scene()
+    obs = [_pts() for _ in range(5)]
+    scene.add(*obs)
+    late = _pts(visible=False)
+    scene.add(late)
+    cam = gfx.PerspectiveCamera(70, 1)
+    cam.local.z = 10
+    vm = cam.view_matrix
+
+    flat = FlatScene(scene, vm, 0)
+    cache = scene._renderable_cache
+    assert late not in [w.wobject for w in flat._wobject_wrappers]
+    assert late._renderer_id == 0
+
+    obs[1].visible = False
+    order = _order(scene, vm)
+    assert scene._renderable_cache is cache  # no rebuild
+    assert obs[1] not in order
+    assert order == _reference(scene, vm)
+
+    obs[1].local.x = 7.0  # moved while hidden
+    count = FlatScene(scene, vm, flat.object_count).object_count
+    count = FlatScene(scene, vm, count).object_count  # nothing moved: skip
+    obs[1].visible = True  # shown; no transform changes since
+    count = FlatScene(scene, vm, count).object_count
+    assert _uniform_x(obs[1]) == 7.0
+    assert scene._renderable_cache is cache
+
+    late.visible = True
+    order = _order(scene, vm)
+    assert late in order and late._renderer_id > 0
+    assert order == _reference(scene, vm)
+    assert scene._renderable_cache is cache

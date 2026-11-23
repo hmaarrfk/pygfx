@@ -63,6 +63,12 @@ global_context = None
 
 simple_value_types = None.__class__, bool, int, float, str
 
+# The PropTrackers that have pending changes (that ``pop_changed()`` would
+# return). A tracker adds itself when a change is recorded and removes itself
+# in ``pop_changed()``. This lets a consumer (the renderer) skip polling
+# trackers that cannot have changed. Weak, so it never keeps a tracker alive.
+dirty_trackers = weakref.WeakSet()
+
 
 def get_comp_value(value):
     if isinstance(value, simple_value_types):
@@ -206,6 +212,7 @@ class PropTracker:
             result.update(labels)
         # Reset and return
         self._trackable_changed = {}
+        dirty_trackers.discard(self)
         return set(label.lstrip("!") for label in result)
 
     def _track_store(self, store, label):
@@ -308,6 +315,10 @@ class PropTracker:
                     self._trackable_changed.pop(name)
             elif comp_value != cur_value:
                 self._trackable_values[name] = ref_value, comp_value
+
+        # Changes can also be recorded by _track_set_follow_tree, called above
+        if self._trackable_changed:
+            dirty_trackers.add(self)
 
     def _track_set_follow_tree(self, old_store, new_store):
         # old_store must be a store

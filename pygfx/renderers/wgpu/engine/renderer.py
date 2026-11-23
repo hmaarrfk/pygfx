@@ -15,7 +15,6 @@ from rendercanvas import BaseRenderCanvas
 
 from ....cameras import Camera
 from ....objects import (
-    Group,
     KeyboardEvent,
     PointerEvent,
     RootEventHandler,
@@ -24,22 +23,18 @@ from ....objects import (
     WorldObject,
 )
 from ....objects._base import id_provider
-from ....objects._lights import (
-    AmbientLight,
-    DirectionalLight,
-    Light,
-    PointLight,
-    SpotLight,
-)
 from ....resources import Texture
 from ....resources._base import resource_update_registry
 from ....utils import Color
 from ....utils.enums import PixelFilter
+from ....geometries._base import GRID_EPOCH
+from ....utils.trackable import dirty_trackers
 from ... import Renderer
 from .blender import Blender
 from .effectpasses import DDAAPass, EffectPass, FXAAPass, OutputPass, PPAAPass
 from .mipmapsutil import generate_texture_mipmaps
-from .pipeline import get_pipeline_container_group
+from . import pipeline as _pipeline
+from .pipeline import RenderPassState, get_pipeline_container_group
 from .renderstate import get_renderstate
 from .shadowutil import render_shadow_maps
 from .shared import get_shared
@@ -52,19 +47,333 @@ logger = logging.getLogger("pygfx")
 class WobjectWrapper:
     """To temporary wrap each wobject for each draw."""
 
-    __slots__ = ["pass_type", "render_containers", "sort_key", "wobject"]
+    __slots__ = [
+        "pass_type",
+        "pcg",
+        "pcg_material",
+        "pcg_renderstate",
+        "render_containers",
+        "sort_key",
+        "wobject",
+    ]
 
     def __init__(self, wobject, sort_key, pass_type):
         self.wobject = wobject
         self.sort_key = sort_key
         self.pass_type = pass_type
         self.render_containers = None
+        # The pipeline container group last used for this wrapper, and the
+        # renderstate and material it belongs to. Wrappers are cached across
+        # frames, so the lookup is skipped while these stay the same.
+        self.pcg = None
+        self.pcg_material = None
+        self.pcg_renderstate = None
+
+
+class _RenderableCache:
+    """Camera-independent renderable data for one scene, cached across frames.
+
+    Building this is the expensive part of the render loop (walking the index,
+    reading each material's render_queue / alpha_method, allocating wrappers).
+    None of it depends on the camera, so it is kept on the scene and reused
+    while the scene's ``_subtree_index.version`` is unchanged (bumped by the
+    scene-graph / material mutations that affect it). Only the depth (camera
+    distance) is recomputed per frame; object *positions* are refreshed
+    incrementally via ``transform.last_modified`` so that moving objects don't
+    force a full rebuild.
+
+    The cache holds hidden objects too. A visibility change only bumps
+    ``_subtree_index.visibility_version``, after which the visible subset is
+    selected again (``select_visible``), which is much cheaper than a rebuild.
+    """
+
+    __slots__ = (
+        "all_renderable_row",
+        "all_stamps",
+        "all_update_always",
+        "all_visible",
+        "all_wobjects",
+        "always_rows",
+        "collect_states",
+        "cull_center",
+        "cull_extent",
+        "cull_local",
+        "cull_ok",
+        "cull_results",
+        "cull_rows",
+        "dist_no_camera",
+        "grid_epoch",
+        "group_order",
+        "has_weighted",
+        "positions",
+        "render_order",
+        "render_queue",
+        "sign",
+        "swept_root",
+        "swept_root_modified",
+        "version",
+        "visibility_version",
+        "visible_arrays",
+        "visible_rows",
+        "visible_wrappers",
+        "weighted",
+        "wobjects",
+        "wrappers",
+    )
+
+    @classmethod
+    def build(cls, scene, index):
+        self = cls()
+        self.collect_states = []
+        # All renderables, also hidden ones (see select_visible)
+        renderables = []
+        if scene._renderable_in_index:
+            renderables.append(scene)
+        renderables.extend(index.renderable)
+
+        wobjects, wrappers = [], []
+        rq_l, go_l, ro_l, sign_l, w_l, pos_l = [], [], [], [], [], []
+        for wobject in renderables:
+            material = wobject._material
+            if material is None:  # cleared concurrently; skip
+                continue
+            group_ref = wobject._closest_group_ancestor_ref
+            group_ob = group_ref() if group_ref is not None else None
+            render_queue = material.render_queue
+            rq_l.append(render_queue)
+            go_l.append(group_ob.render_order if group_ob is not None else 0)
+            ro_l.append(wobject.render_order)
+            sign_l.append(1.0 if 1500 < render_queue <= 2500 else -1.0)
+            w_l.append(material.alpha_method == "weighted")
+            pos_l.append(wobject.world.position)
+            wobjects.append(wobject)
+            wrappers.append(WobjectWrapper(wobject, None, material.alpha_method))
+
+        self.wobjects = wobjects
+        self.wrappers = wrappers
+        self.render_queue = np.array(rq_l, np.int64)
+        self.group_order = np.array(go_l, np.float64)
+        self.render_order = np.array(ro_l, np.float64)
+        self.sign = np.array(sign_l, np.float64)
+        self.weighted = np.array(w_l, bool)
+        self.has_weighted = bool(self.weighted.any()) if w_l else False
+        self.positions = (
+            np.asarray(pos_l, np.float64) if pos_l else np.empty((0, 3), np.float64)
+        )
+        # Frustum culling: objects drawn within their grid bounds can be
+        # skipped when those bounds are out of view. Bounds are filled in by
+        # update_cull_bounds (at first use, and when grids are replaced) and
+        # update_objects (when objects move).
+        n = len(wobjects)
+        self.cull_rows = np.array(
+            [r for r, w in enumerate(wobjects) if w._cull_with_grid_bounds], np.int64
+        )
+        self.cull_ok = np.zeros(n, bool)  # cullable and has bounds
+        self.cull_local = np.zeros((n, 2, 3))
+        self.cull_center = np.zeros((n, 3))
+        self.cull_extent = np.zeros((n, 3))
+        self.cull_results = []
+        self.grid_epoch = None
+
+        # Depth flag when there is no camera: -1 everywhere, 0 for weighted.
+        dist = np.full(len(wobjects), -1.0)
+        if self.has_weighted:
+            dist[self.weighted] = 0.0
+        self.dist_no_camera = dist
+
+        # All objects (not just renderables) need a renderer-id and a
+        # per-frame transform refresh when visible. Cache that list too, plus
+        # for each entry the row into ``positions`` if it is a renderable (else
+        # -1), so the per-frame pass updates transforms and renderable
+        # positions in one sweep. ``all_stamps`` starts at -1 so the first
+        # frame after a (re)build runs ``_update_object`` for everything.
+        row_of = {w: r for r, w in enumerate(wobjects)}
+        all_raw = [scene]
+        all_raw.extend(index.all_objects)
+        self.all_renderable_row = np.array(
+            [row_of.get(w, -1) for w in all_raw], np.int64
+        )
+        # ``_self()`` derefs a possible weakproxy (e.g. FastPlotLib), matching
+        # the historical per-object loop; it is identity for normal objects.
+        self.all_wobjects = [w._self() for w in all_raw]
+        self.all_stamps = np.full(len(all_raw), -1, np.int64)
+        # Classes that override ``_update_object`` do per-draw work unrelated
+        # to their own transform (skinning, light helpers, text layout), so
+        # they are updated every frame, as before this cache existed.
+        self.all_update_always = [
+            w._update_object_every_frame for w in self.all_wobjects
+        ]
+        self.always_rows = [i for i, a in enumerate(self.all_update_always) if a]
+        # The root transform's ``subtree_modified`` at the last full sweep
+        self.swept_root = None
+        self.swept_root_modified = None
+        self.visibility_version = None  # select_visible() runs on first use
+        return self
+
+    def select_visible(self):
+        """Select the visible renderables (and the visible objects for the
+        sweep). Called after a (re)build and after visibility changes."""
+        visible = [w._effective_visible for w in self.wobjects]
+        if all(visible):
+            self.visible_rows = None
+            self.visible_wrappers = self.wrappers
+            self.visible_arrays = (
+                self.render_queue,
+                self.group_order,
+                self.render_order,
+                self.sign,
+                self.weighted,
+                self.dist_no_camera,
+            )
+        else:
+            rows = np.flatnonzero(np.array(visible, bool))
+            self.visible_rows = rows
+            wrappers = self.wrappers
+            self.visible_wrappers = [wrappers[i] for i in rows]
+            self.visible_arrays = (
+                self.render_queue[rows],
+                self.group_order[rows],
+                self.render_order[rows],
+                self.sign[rows],
+                self.weighted[rows],
+                self.dist_no_camera[rows],
+            )
+        self.all_visible = [w._effective_visible for w in self.all_wobjects]
+        # An object that becomes visible may have moved while hidden (hidden
+        # objects are not swept), so the next sweep must visit everything.
+        self.swept_root = None
+        self.cull_results = []
+
+    def update_cull_bounds(self, rows=None, local=True):
+        """Recompute the world bounds (center, half extent) used for culling,
+        for the given renderable rows (default: all cullable rows). With
+        ``local``, also re-read the local bounds from the geometry."""
+        if rows is None:
+            rows = self.cull_rows
+        if not len(rows):
+            return
+        wobjects = self.wobjects
+        if local:
+            for r in rows:
+                bounds = wobjects[r]._get_bounds_from_geometry()
+                if bounds is None:
+                    self.cull_ok[r] = False
+                else:
+                    self.cull_ok[r] = True
+                    self.cull_local[r] = bounds.aabb
+        rows = rows[self.cull_ok[rows]]
+        if not len(rows):
+            return
+        matrices = np.stack([wobjects[r].world.matrix for r in rows])
+        lo, hi = self.cull_local[rows, 0], self.cull_local[rows, 1]
+        linear = matrices[:, :3, :3]
+        self.cull_center[rows] = (
+            np.einsum("nij,nj->ni", linear, (lo + hi) * 0.5) + matrices[:, :3, 3]
+        )
+        self.cull_extent[rows] = np.einsum(
+            "nij,nj->ni", np.abs(linear), (hi - lo) * 0.5
+        )
+
+    def select_in_view(self, cull_matrix):
+        """The visible renderables that are not outside the view of
+        ``cull_matrix`` (projection @ view). Returns (wrappers, arrays, rows),
+        like the ``visible_*`` attributes.
+
+        An object is outside when its world bounding box is entirely beyond
+        one of the four side planes of the clip volume (near and far are not
+        used, so depth conventions do not matter). Only objects with
+        ``cull_ok`` can be outside. The result is reused while the same
+        objects are in view, so that the draw list stays the same object.
+        """
+        rows = self.visible_rows
+        ok = self.cull_ok if rows is None else self.cull_ok[rows]
+        if not ok.any():
+            return self.visible_wrappers, self.visible_arrays, rows
+        m = np.asarray(cull_matrix, np.float64)
+        # Clip-space side planes as (a, b, c, d) with inside: a*x + b*y + c*z + d >= 0
+        planes = np.stack([m[3] + m[0], m[3] - m[0], m[3] + m[1], m[3] - m[1]])
+        centers = self.cull_center if rows is None else self.cull_center[rows]
+        extents = self.cull_extent if rows is None else self.cull_extent[rows]
+        dist = centers @ planes[:, :3].T + planes[:, 3]
+        radius = extents @ np.abs(planes[:, :3]).T
+        outside = (dist < -radius).any(axis=1) & ok
+        if not outside.any():
+            return self.visible_wrappers, self.visible_arrays, rows
+        keep = ~outside
+        for prev_keep, result in self.cull_results:
+            if np.array_equal(prev_keep, keep):
+                return result
+        sel = np.flatnonzero(keep)
+        wrappers = self.visible_wrappers
+        result = (
+            [wrappers[i] for i in sel],
+            tuple(a[sel] for a in self.visible_arrays),
+            sel if rows is None else rows[sel],
+        )
+        self.cull_results.insert(0, (keep, result))
+        del self.cull_results[4:]
+        return result
+
+    def update_objects(self, object_count, root):
+        """Per-frame sweep over every visible object: assign renderer-ids to
+        new objects and run ``_update_object`` for those whose transform
+        changed since last frame (and always for classes that override it),
+        refreshing cached renderable positions in the same pass. Returns the
+        new ``object_count``.
+
+        ``root`` is the root of the scene's transform tree. When its
+        ``subtree_modified`` stamp is unchanged since the last sweep, no
+        transform in the tree changed, so only the always-updated objects are
+        visited.
+        """
+        root_modified = root.subtree_modified
+        if root is self.swept_root and root_modified == self.swept_root_modified:
+            rows = self.always_rows
+        else:
+            rows = range(len(self.all_wobjects))
+            # Read before the sweep: changes made during it are seen next time
+            self.swept_root = root
+            self.swept_root_modified = root_modified
+        stamps = self.all_stamps
+        renderable_rows = self.all_renderable_row
+        positions = self.positions
+        allw = self.all_wobjects
+        always = self.all_update_always
+        visible = self.all_visible
+        moved = []
+        for i in rows:
+            if not visible[i]:
+                continue
+            wobject = allw[i]
+            if wobject._renderer_id == 0:
+                object_count += 1
+                wobject._assign_renderer_id(object_count)
+            lm = wobject.world.last_modified
+            if lm != stamps[i] or always[i]:
+                wobject._update_object()
+                if lm != stamps[i]:
+                    stamps[i] = lm
+                    # Always refresh: the stamp is now current, so a later
+                    # frame that does need positions would not refresh it.
+                    r = renderable_rows[i]
+                    if r >= 0:
+                        positions[r] = wobject.world.position
+                        moved.append(r)
+        if moved:
+            moved = np.array(moved, np.int64)
+            self.update_cull_bounds(moved[self.cull_ok[moved]], local=False)
+        return object_count
 
 
 class FlatScene:
-    def __init__(self, scene, view_matrix=None, object_count=0):
+    def __init__(self, scene, view_matrix=None, object_count=0, cull_matrix=None):
         self._view_matrix = view_matrix
+        # projection @ view matrix to cull objects outside the view (or None)
+        self._cull_matrix = cull_matrix
         self._wobject_wrappers = []  # WobjectWrapper's
+        self._collect_states = None  # list of _CollectState, shared via the cache
+        self._pass_lists = None
+        self._sort_arrays = None  # (render_queue, group_order, render_order, dist)
         self.lights = {
             "point_lights": [],
             "directional_lights": [],
@@ -76,99 +385,206 @@ class FlatScene:
         self.scene = scene
         self.add_scene(scene)
 
-    def _iter_scene(self, ob, group_order=0):
-        if not ob.visible:
-            return
-
-        if isinstance(ob, Group):
-            group_order = ob.render_order
-
-        yield ob, group_order
-        for child in ob._children:
-            yield from self._iter_scene(child, group_order)
-
     def add_scene(self, scene):
-        """Add a scene to the total flat scene. Is usually called just once."""
+        """Add a scene to the total flat scene. Is usually called just once.
+
+        This reads pre-categorized flat lists from ``scene._subtree_index``
+        (maintained incrementally by ``WorldObject.add``/``remove``) so
+        that no scene-graph traversal is needed at render time.
+
+        ``scene`` itself is **not** an entry of ``scene._subtree_index``
+        (the index covers descendants only, by design — see
+        ``_SubtreeIndex``), so we process ``scene`` separately and then
+        the descendants.
+        """
 
         # Put some attributes as vars in this namespace for faster access
         view_matrix = self._view_matrix
-        wobject_wrappers = self._wobject_wrappers
+        # Restore DFS pre-order if a non-tail mutation left the index dirty
+        # (cheap no-op in steady-state render loops).
+        scene._ensure_subtree_index_order()
+        index = scene._subtree_index
 
-        for wobject, group_order in self._iter_scene(scene):
-            # Dereference the object in case its a weak proxy
-            wobject = wobject._self()
-            # Assign renderer id's
-            self.object_count += wobject._assign_renderer_id(self.object_count + 1)
-            # Update things like transform and uniform buffers
-            wobject._update_object()
+        # Visible lights, by type. Visibility is dynamic (and ancestors
+        # can hide a subtree), so we filter via the cached
+        # ``_effective_visible`` flag, which the index keeps up-to-date.
+        # The index excludes ``scene`` itself; if scene happens to be a
+        # light, fold its contribution in too.
+        scene_kind = scene._subtree_light_kind
+        scene_visible = scene._effective_visible
 
-            # Light objects
-            if isinstance(wobject, Light):
-                if isinstance(wobject, PointLight):
-                    self.lights["point_lights"].append(wobject)
-                elif isinstance(wobject, DirectionalLight):
-                    self.lights["directional_lights"].append(wobject)
-                elif isinstance(wobject, SpotLight):
-                    self.lights["spot_lights"].append(wobject)
-                elif isinstance(wobject, AmbientLight):
-                    r, g, b = wobject.color.to_physical()
-                    ambient_color = self.lights["ambient_color"]
-                    ambient_color[0] += r * wobject.intensity
-                    ambient_color[1] += g * wobject.intensity
-                    ambient_color[2] += b * wobject.intensity
+        point_lights = self.lights["point_lights"]
+        if scene_visible and scene_kind == "point":
+            point_lights.append(scene)
+        for light in index.lights_point:
+            if light._effective_visible:
+                point_lights.append(light)
 
-            # Shadowable objects
-            if wobject.cast_shadow and wobject.geometry is not None:
-                self.shadow_objects.append(wobject)
+        directional_lights = self.lights["directional_lights"]
+        if scene_visible and scene_kind == "directional":
+            directional_lights.append(scene)
+        for light in index.lights_directional:
+            if light._effective_visible:
+                directional_lights.append(light)
 
-            # Renderable objects
-            material = wobject._material
-            if material is not None:
-                render_queue = material.render_queue
-                alpha_method = material.alpha_method
+        spot_lights = self.lights["spot_lights"]
+        if scene_visible and scene_kind == "spot":
+            spot_lights.append(scene)
+        for light in index.lights_spot:
+            if light._effective_visible:
+                spot_lights.append(light)
 
-                # By default sort back-to-front, for correct blending.
-                dist_sort_sign = -1
-                # But for opaque queues, render front-to-back to avoid overdraw.
-                if 1500 < render_queue <= 2500:
-                    dist_sort_sign = 1
+        # Ambient lights: aggregate physical color contributions.
+        ambient_color = self.lights["ambient_color"]
+        if scene_visible and scene_kind == "ambient":
+            r, g, b = scene.color.to_physical()
+            ambient_color[0] += r * scene.intensity
+            ambient_color[1] += g * scene.intensity
+            ambient_color[2] += b * scene.intensity
+        for light in index.lights_ambient:
+            if not light._effective_visible:
+                continue
+            r, g, b = light.color.to_physical()
+            ambient_color[0] += r * light.intensity
+            ambient_color[1] += g * light.intensity
+            ambient_color[2] += b * light.intensity
 
-                pass_type = alpha_method
+        # Renderable objects: the camera-independent part (which objects,
+        # their wrappers and sort-key components) is cached on the scene and
+        # reused across frames while the scene's index version is unchanged.
+        # Only the depth sort key (camera distance) is computed per frame.
+        cache = getattr(scene, "_renderable_cache", None)
+        version = index.version
+        if cache is None or cache.version != version:
+            cache = _RenderableCache.build(scene, index)
+            cache.version = version
+            scene._renderable_cache = cache
+        if cache.visibility_version != index.visibility_version:
+            cache.select_visible()
+            cache.visibility_version = index.visibility_version
+        cull_matrix = self._cull_matrix
+        if cull_matrix is not None and cache.grid_epoch != GRID_EPOCH[0]:
+            # First use, or a geometry's grid was replaced somewhere
+            cache.update_cull_bounds()
+            cache.grid_epoch = GRID_EPOCH[0]
 
-                # Get depth sorting flag. Note that use camera's view matrix, since the projection does not affect the depth order.
-                # It also means we can set projection=False optimalization.
-                # Also note that we look down -z.
-                if alpha_method == "weighted":
-                    dist_flag = 0
-                elif view_matrix is None:
-                    dist_flag = -1
-                else:
-                    relative_pos = la.vec_transform(
-                        wobject.world.position, view_matrix, projection=False
-                    )
-                    # Cam looks towards -z: negate to get distance
-                    distance_to_camera = float(-relative_pos[2])
-                    dist_flag = distance_to_camera * dist_sort_sign
+        need_pos = view_matrix is not None
 
-                sort_key = (render_queue, group_order, wobject.render_order, dist_flag)
-                wobject_wrappers.append(WobjectWrapper(wobject, sort_key, pass_type))
+        # Per-object pass over every visible object (incl. groups/cameras):
+        # assign renderer-ids to new objects and run ``_update_object`` for
+        # those whose transform changed (and always for classes that override
+        # it), refreshing cached renderable positions in the same sweep.
+        self.object_count = cache.update_objects(
+            self.object_count, scene.world.get_root()
+        )
+
+        # Shadow casters (objects with cast_shadow and a geometry).
+        shadow_objects = self.shadow_objects
+        if scene_visible and scene._caster_in_index:
+            shadow_objects.append(scene)
+        for wobject in index.shadow_casters:
+            if wobject._effective_visible:
+                shadow_objects.append(wobject)
+
+        wrappers, arrays, rows = (
+            cache.visible_wrappers,
+            cache.visible_arrays,
+            cache.visible_rows,
+        )
+        if cull_matrix is not None:
+            wrappers, arrays, rows = cache.select_in_view(cull_matrix)
+        self._wobject_wrappers = wrappers
+        self._collect_states = cache.collect_states
+        if not wrappers:
+            self._sort_arrays = None
+            return
+
+        rq, go, ro, sign, weighted, dist_no_camera = arrays
+        if not need_pos:
+            dist_a = dist_no_camera
+        else:
+            positions = cache.positions if rows is None else cache.positions[rows]
+            relative = la.vec_transform(positions, view_matrix, projection=False)
+            dist_a = -relative[:, 2] * sign  # fresh array
+            if cache.has_weighted:
+                dist_a[weighted] = 0.0
+
+        self._sort_arrays = (rq, go, ro, dist_a)
 
     def sort(self):
-        """Sort the world objects."""
-        self._wobject_wrappers.sort(key=lambda ob: ob.sort_key)
+        """Sort the world objects (stable depth sort via ``np.lexsort``)."""
+        arrays = self._sort_arrays
+        if arrays is None:
+            return
+        render_queue_a, group_order_a, render_order_a, dist_a = arrays
+        # lexsort: last key is primary -> (render_queue, group_order,
+        # render_order, dist), ascending, stable.
+        order = np.lexsort((dist_a, render_order_a, group_order_a, render_queue_a))
+        wrappers = self._wobject_wrappers
+        self._wobject_wrappers = [wrappers[i] for i in order]
 
     def collect_pipelines_container_groups(self, renderstate):
         """Select and resolve the pipeline, compiling shaders, building pipelines and composing binding as needed."""
+        wrappers = self._wobject_wrappers
+        states = self._collect_states
+        if states is not None:
+            # Fast path: the same draw list as a previous frame, none of its
+            # pipeline container groups has pending changes (their trackers
+            # are not dirty), and no pipeline container group anywhere changed
+            # since then. The previous result is then still exact.
+            epoch = _pipeline.PIPELINE_EPOCH
+            for state in states:
+                if (
+                    state.renderstate is renderstate
+                    and state.epoch == epoch
+                    and state.wrappers == wrappers
+                    and state.trackers.isdisjoint(dirty_trackers)
+                ):
+                    self._compute_pipeline_containers = state.compute_containers
+                    self._bake_functions = state.bake_functions
+                    self._pass_lists = state.pass_lists
+                    return
+
         self._compute_pipeline_containers = compute_pipeline_containers = []
         self._bake_functions = bake_functions = []
-        for wrapper in self._wobject_wrappers:
-            container_group = get_pipeline_container_group(
-                wrapper.wobject, self.scene, renderstate
-            )
-            compute_pipeline_containers.extend(container_group.compute_containers)
+        self._pass_lists = None
+        scene = self.scene
+        for wrapper in wrappers:
+            wobject = wrapper.wobject
+            material = wobject._material
+            container_group = wrapper.pcg
+            if (
+                container_group is not None
+                and wrapper.pcg_renderstate is renderstate
+                and wrapper.pcg_material is material
+            ):
+                # Same group as last frame; only check it for changes.
+                container_group.update(wobject, scene, renderstate)
+            else:
+                container_group = get_pipeline_container_group(
+                    wobject, scene, renderstate
+                )
+                wrapper.pcg = container_group
+                wrapper.pcg_renderstate = renderstate
+                wrapper.pcg_material = material
+            if container_group.compute_containers:
+                compute_pipeline_containers.extend(container_group.compute_containers)
             wrapper.render_containers = container_group.render_containers
             for func in container_group.bake_functions:
-                bake_functions.append((wrapper.wobject, func))
+                bake_functions.append((wobject, func))
+
+        if states is not None:
+            # Remember the result for the next frames (a few, e.g. one per view)
+            state = _CollectState()
+            state.renderstate = renderstate
+            state.epoch = _pipeline.PIPELINE_EPOCH
+            state.wrappers = list(wrappers)
+            state.trackers = {w.pcg.tracker for w in wrappers}
+            state.compute_containers = compute_pipeline_containers
+            state.bake_functions = bake_functions
+            state.pass_lists = self._pass_lists = self._build_pass_lists()
+            states.insert(0, state)
+            del states[4:]
 
     def call_bake_functions(self, camera, logical_size):
         """Call any collected bake functions."""
@@ -185,17 +601,41 @@ class FlatScene:
 
     def iter_render_pipelines_per_pass_type(self):
         """Generator that yields (pass_type, wobjects), with pass_type 'opaque', 'transparency' or 'weighted'."""
+        pass_lists = getattr(self, "_pass_lists", None)
+        if pass_lists is None:
+            pass_lists = self._build_pass_lists()
+        yield from pass_lists
+
+    def _build_pass_lists(self):
+        """The render pipeline containers grouped in consecutive runs of the same pass type."""
+        result = []
         current_pass_type = ""
         current_pipeline_containers = []
         for wrapper in self._wobject_wrappers:
             if wrapper.pass_type != current_pass_type:
                 if current_pipeline_containers:
-                    yield (current_pass_type, current_pipeline_containers)
+                    result.append((current_pass_type, current_pipeline_containers))
                 current_pass_type = wrapper.pass_type
                 current_pipeline_containers = []
             current_pipeline_containers.extend(wrapper.render_containers)
         if current_pipeline_containers:
-            yield (current_pass_type, current_pipeline_containers)
+            result.append((current_pass_type, current_pipeline_containers))
+        return result
+
+
+class _CollectState:
+    """The result of ``FlatScene.collect_pipelines_container_groups`` for one
+    draw list, kept on the scene's renderable cache for reuse."""
+
+    __slots__ = [
+        "bake_functions",
+        "compute_containers",
+        "epoch",
+        "pass_lists",
+        "renderstate",
+        "trackers",
+        "wrappers",
+    ]
 
 
 class WgpuRenderer(RootEventHandler, Renderer):
@@ -251,6 +691,16 @@ class WgpuRenderer(RootEventHandler, Renderer):
         canvas downloads.
     """
 
+    # Replay unchanged render passes from a recorded render bundle (see
+    # ``_get_render_bundle``). Set to False on a subclass or instance to always
+    # issue the draw calls directly.
+    _use_render_bundles = True
+
+    # Skip objects that are entirely outside the camera's view. Only objects
+    # with ``_cull_with_grid_bounds`` (Image, Volume) are culled. Set to False
+    # on a subclass or instance to always draw every visible object.
+    _use_frustum_culling = True
+
     def __init__(
         self,
         target,
@@ -303,6 +753,8 @@ class WgpuRenderer(RootEventHandler, Renderer):
 
         # Cache renderstate objects for n draws
         self._renderstates_per_flush = []
+        # Recorded render bundles: key -> [signature, containers, bundle]
+        self._render_bundles = {}
 
         # Get target format
         self.gamma_correction = gamma_correction
@@ -787,7 +1239,8 @@ class WgpuRenderer(RootEventHandler, Renderer):
         view_matrix = None
         if self._sort_objects:
             view_matrix = camera.view_matrix  # == camera.world.inverse_matrix
-        flat = FlatScene(scene, view_matrix, self._object_count)
+        cull_matrix = camera.camera_matrix if self._use_frustum_culling else None
+        flat = FlatScene(scene, view_matrix, self._object_count, cull_matrix)
         self._object_count = flat.object_count
         flat.sort()
 
@@ -952,25 +1405,44 @@ class WgpuRenderer(RootEventHandler, Renderer):
 
         blender = self._blender
         rendered_something = False
+        # Identifies this render() call within the current flush, so that a
+        # recorded render bundle is only reused for the same call next frame.
+        call_index = len(self._renderstates_per_flush[0])
 
-        for iter in flat.iter_render_pipelines_per_pass_type():
-            pass_type, render_pipeline_containers = iter
-
+        for pass_index, (pass_type, render_pipeline_containers) in enumerate(
+            flat.iter_render_pipelines_per_pass_type()
+        ):
             # Only render this pass type if there are objects
             if not render_pipeline_containers:
                 continue
             rendered_something = True
 
+            color_attachments = blender.get_color_attachments(pass_type)
+            depth_stencil_attachment = blender.get_depth_stencil_attachment()
             render_pass = command_encoder.begin_render_pass(
-                color_attachments=blender.get_color_attachments(pass_type),
-                depth_stencil_attachment=blender.get_depth_stencil_attachment(),
+                color_attachments=color_attachments,
+                depth_stencil_attachment=depth_stencil_attachment,
                 occlusion_query_set=None,
             )
 
             render_pass.set_viewport(*physical_viewport)
 
-            for render_pipeline_container in render_pipeline_containers:
-                render_pipeline_container.draw(render_pass, renderstate)
+            bundle = None
+            if self._use_render_bundles:
+                bundle_key = (id(flat.scene), call_index, pass_index, pass_type)
+                bundle = self._get_render_bundle(
+                    bundle_key,
+                    renderstate,
+                    render_pipeline_containers,
+                    color_attachments,
+                    depth_stencil_attachment,
+                )
+            if bundle is not None:
+                render_pass.execute_bundles([bundle])
+            else:
+                pass_state = RenderPassState()
+                for render_pipeline_container in render_pipeline_containers:
+                    render_pipeline_container.draw(render_pass, renderstate, pass_state)
 
             render_pass.end()
 
@@ -984,6 +1456,67 @@ class WgpuRenderer(RootEventHandler, Renderer):
             blender.get_depth_stencil_attachment()
 
         return [command_encoder.finish()]
+
+    def _get_render_bundle(
+        self,
+        key,
+        renderstate,
+        containers,
+        color_attachments,
+        depth_stencil_attachment,
+    ):
+        """Return a render bundle for this pass's draw list, or None to draw directly.
+
+        A bundle replays the recorded draw calls on the GPU side, so the CPU
+        cost of an unchanged pass no longer grows with the number of objects.
+        A bundle is recorded only once the same draw list has been seen two
+        frames in a row (a list that changes every frame is drawn directly,
+        so it does not pay for recording), and reused while nothing that it
+        bakes in has changed: the containers (same objects, same order), their
+        pipelines/bind groups/draw ranges (tracked by ``PIPELINE_EPOCH``), the
+        renderstate and the target formats. Passes that need a stencil
+        reference other than 0 are not bundled, because a bundle cannot set it.
+        """
+        depth_format = None
+        if depth_stencil_attachment is not None:
+            depth_format = depth_stencil_attachment.view.texture.format
+        signature = (
+            tuple(a.view.texture.format for a in color_attachments),
+            depth_format,
+            color_attachments[0].view.texture.sample_count,
+            renderstate,
+            renderstate.wgpu_bind_group,
+            _pipeline.PIPELINE_EPOCH,
+        )
+        bundles = self._render_bundles
+        entry = bundles.get(key)
+        if (
+            entry is None
+            or entry[0] != signature
+            or (entry[1] is not containers and entry[1] != containers)
+        ):
+            # New or changed draw list: draw directly, remember it.
+            bundles.pop(key, None)
+            # The list is not mutated afterwards, so keep it (cheap identity check)
+            bundles[key] = [signature, containers, None]
+            while len(bundles) > 64:
+                bundles.pop(next(iter(bundles)))
+            return None
+        if entry[2] is None:
+            # Second frame in a row with the same draw list: record it.
+            for container in containers:
+                if not container.broken and container.wobject_info["stencil_value"]:
+                    return None  # bundles cannot set the stencil reference
+            encoder = self._device.create_render_bundle_encoder(
+                color_formats=list(signature[0]),
+                depth_stencil_format=depth_format,
+                sample_count=signature[2],
+            )
+            pass_state = RenderPassState()
+            for container in containers:
+                container.draw(encoder, renderstate, pass_state)
+            entry[2] = encoder.finish()
+        return entry[2]
 
     def _update_stdinfo_buffer(
         self, camera: Camera, physical_size, physical_offset, logical_size, ndc_offset
