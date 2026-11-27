@@ -243,7 +243,8 @@ class WgpuRenderer(RootEventHandler, Renderer):
         Float32 requires the "float32-blendable" and "float32-filterable" device
         features. Enable these with
         ``pygfx.renderers.wgpu.enable_wgpu_features("float32-blendable", "float32-filterable")``
-        before creating the first renderer (float32-filterable is enabled by default).
+        before creating the first renderer (float32-filterable is enabled by default
+        when the device has it).
         Weighted transparency uses float16 accumulation and uint8 revealage
         for "uint8", float16 for both buffers with "float16", and float32 for
         both with "float32" (9, 10 and 20 bytes per pixel respectively).

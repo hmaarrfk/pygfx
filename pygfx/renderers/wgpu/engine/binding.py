@@ -6,12 +6,44 @@ from ....utils import logger
 
 from .utils import to_texture_format, GfxSampler, GfxTextureView
 from .update import ensure_wgpu_object, ALTTEXFORMAT
+from .shared import texture_format_is_filterable
 
 
 visibility_render = wgpu.ShaderStage.VERTEX | wgpu.ShaderStage.FRAGMENT
 visibility_all = (
     wgpu.ShaderStage.VERTEX | wgpu.ShaderStage.FRAGMENT | wgpu.ShaderStage.COMPUTE
 )
+
+
+_warned_unfilterable = set()
+
+
+def sampler_binding_for_texture(name, filter, address_mode, view, visibility):
+    """Get the Binding for a sampler that samples the given texture view.
+
+    Normally a filtering sampler with the given filter. Without the
+    'float32-filterable' feature, a float32 texture cannot be sampled with a
+    filtering sampler: it then gets a non-filtering one, with 'nearest', and a
+    warning (once per format) if that changes the requested filter. Shaders
+    that can interpolate in the shader (images, volumes, colormaps) use
+    textureLoad instead, and do not need this.
+    """
+    fmt = to_texture_format(view.format)
+    fmt = ALTTEXFORMAT.get(fmt, [fmt])[0]
+    if texture_format_is_filterable(fmt):
+        return Binding(
+            name, "sampler/filtering", GfxSampler(filter, address_mode), visibility
+        )
+    if "linear" in filter and fmt not in _warned_unfilterable:
+        _warned_unfilterable.add(fmt)
+        logger.warning(
+            f"The device cannot filter {fmt} textures (no 'float32-filterable' "
+            f"feature): {name} samples with 'nearest' instead of '{filter}'. "
+            "Use float16 data for smooth sampling on such devices."
+        )
+    return Binding(
+        name, "sampler/non_filtering", GfxSampler("nearest", address_mode), visibility
+    )
 
 
 class Binding:
@@ -143,12 +175,12 @@ class Binding:
                 fmt = ALTTEXFORMAT.get(fmt, [fmt])[0]
                 if "float" in fmt or "norm" in fmt:
                     sample_type = wgpu.TextureSampleType.float
-                    # For float32 wgpu does not allow the sampler to be filterable,
-                    # except when the native-only feature
-                    # TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES is set,
-                    # which wgpu-py does by default.
-                    # if "32float" in fmt:
-                    #     sample_type = wgpu.TextureSampleType.unfilterable_float
+                    # Without the 'float32-filterable' feature, a float32
+                    # texture can only be bound as unfilterable: the shader
+                    # then reads it with textureLoad, or with a non-filtering
+                    # sampler (see sampler_for_texture()).
+                    if not texture_format_is_filterable(fmt):
+                        sample_type = wgpu.TextureSampleType.unfilterable_float
                 elif "uint" in fmt:
                     sample_type = wgpu.TextureSampleType.uint
                 elif "sint" in fmt:

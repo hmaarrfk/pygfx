@@ -13,6 +13,7 @@ from ..engine.utils import (
     hash_from_value,
 )
 from ..engine.binding import Binding
+from ..engine.shared import texture_format_is_filterable
 from .resolve import resolve_shadercode
 from .bindings import BindingDefinitions
 from .templating import apply_templating
@@ -260,7 +261,7 @@ class BaseShader(ShaderInterface):
         address_mode = f"{map.wrap_s}, {map.wrap_t}"
 
         sampler = GfxSampler(filter_mode, address_mode)
-        texture_view = self._define_colormap_texture(map.texture)
+        texture_view = self._define_colormap_texture(map)
 
         # Check that texture dim matches texcoords
         if not isinstance(texcoords, Buffer):
@@ -291,7 +292,7 @@ class BaseShader(ShaderInterface):
         address_mode = f"{map.wrap_s}, {map.wrap_t}"
 
         sampler = GfxSampler(filter_mode, address_mode)
-        texture_view = self._define_colormap_texture(map.texture)
+        texture_view = self._define_colormap_texture(map)
 
         # Check that texture dim matches image channels
         if int(texture_view.view_dim[0]) != self["img_nchannels"]:
@@ -306,7 +307,8 @@ class BaseShader(ShaderInterface):
             Binding("u_colormap", "buffer/uniform", map.uniform_buffer, "FRAGMENT"),
         ]
 
-    def _define_colormap_texture(self, texture):
+    def _define_colormap_texture(self, map):
+        texture = map.texture
         # Get texture view
         if not isinstance(texture, Texture):
             raise TypeError("texture must be a Texture")
@@ -325,6 +327,12 @@ class BaseShader(ShaderInterface):
         fmt = to_texture_format(texture_view.format)
         if "norm" in fmt or "float" in fmt:
             self["colormap_format"] = "f32"
+            if not texture_format_is_filterable(fmt):
+                # The device cannot filter float32 (no 'float32-filterable'):
+                # the shader reads the texels and does what the sampler would.
+                self["colormap_format"] = "f32-load"
+                self["colormap_filter"] = map.mag_filter
+                self["colormap_wrap"] = [map.wrap_s, map.wrap_t, map.wrap_t]
         elif "uint" in fmt:
             self["colormap_format"] = "u32"
         else:

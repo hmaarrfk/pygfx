@@ -9,9 +9,9 @@ from .. import (
     BaseShader,
     Binding,
     to_texture_format,
-    GfxSampler,
     GfxTextureView,
     load_wgsl,
+    sampler_binding_for_texture,
 )
 
 
@@ -32,7 +32,6 @@ class BackgroundShader(BaseShader):
         if isinstance(material, BackgroundImageMaterial) and material.map is not None:
             if not isinstance(material.map, TextureMap):
                 raise TypeError("material.map must be a TextureMap.")
-            sampler = GfxSampler("linear", "repeat")
             # Select texture dimension
             texture = material.map.texture
             if texture.size[2] == 1:
@@ -45,7 +44,9 @@ class BackgroundShader(BaseShader):
                 raise ValueError(
                     "BackgroundImageMaterial.map size must be NxMx1 or NxMx6."
                 )
-            bindings[3] = Binding("r_sampler", "sampler/filtering", sampler, "FRAGMENT")
+            bindings[3] = sampler_binding_for_texture(
+                "r_sampler", "linear", "repeat", tex_view, "FRAGMENT"
+            )
             bindings[4] = Binding("r_tex", "texture/auto", tex_view, "FRAGMENT")
             # Channels
             fmt = to_texture_format(texture.format)

@@ -4,6 +4,7 @@ from ....objects import Volume
 from ....materials import VolumeSliceMaterial, VolumeRayMaterial
 from ....resources import Texture
 
+from ..engine.shared import texture_format_is_filterable
 from .. import (
     register_wgpu_render_function,
     BaseShader,
@@ -45,7 +46,13 @@ class BaseVolumeShader(BaseShader):
             self["img_format"] = "i32"
 
         interpolation = material.interpolation
-        if self["img_format"] == "f32" and interpolation in ("nearest", "linear"):
+        # Interpolate with a sampler when the device can filter this format
+        # (float32 needs the 'float32-filterable' feature), else in the shader.
+        if (
+            self["img_format"] == "f32"
+            and interpolation in ("nearest", "linear")
+            and texture_format_is_filterable(fmt)
+        ):
             self["interpolation"] = "via-sampler"
         else:
             self["interpolation"] = interpolation

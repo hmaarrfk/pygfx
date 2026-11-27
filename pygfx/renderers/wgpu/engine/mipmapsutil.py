@@ -4,7 +4,7 @@ import wgpu
 from ....resources._texture import Texture
 
 from .utils import GfxTextureView, GpuCache
-from .shared import get_shared
+from .shared import get_shared, texture_format_is_filterable
 
 
 # This cache enables re-using gpu pipelines for calculating mipmaps, so
@@ -52,6 +52,29 @@ mipmap_fragment_source = """
     @fragment
     fn main( @location( 0 ) vTex : vec2<f32> ) -> @location( 0 ) vec4<f32> {
         return textureSample( img, imgSampler, vTex );
+    }
+"""
+
+
+# Without the 'float32-filterable' feature, a float32 texture cannot be sampled
+# with the (linear) sampler: average the 2x2 texels with textureLoad instead,
+# which is what the linear sampler does at the center of a texel of the next
+# level.
+mipmap_fragment_source_load = """
+
+    @group( 0 ) @binding( 1 )
+    var img : texture_2d<f32>;
+    @fragment
+    fn main( @builtin( position ) pos : vec4<f32> ) -> @location( 0 ) vec4<f32> {
+        let size = vec2<i32>( textureDimensions( img ) );
+        let p = vec2<i32>( pos.xy ) * 2;
+        var color = vec4<f32>( 0.0 );
+        for ( var dy = 0; dy < 2; dy++ ) {
+            for ( var dx = 0; dx < 2; dx++ ) {
+                color += textureLoad( img, min( p + vec2<i32>( dx, dy ), size - 1 ), 0 );
+            }
+        }
+        return color * 0.25;
     }
 """
 
@@ -153,13 +176,10 @@ def get_bind_group(
         if mipmap_sampler is None:
             mipmap_sampler = device.create_sampler(min_filter="linear")
 
-        bind_group = device.create_bind_group(
-            layout=bind_group_layout,
-            entries=[
-                wgpu.BindGroupEntry(binding=0, resource=mipmap_sampler),
-                wgpu.BindGroupEntry(binding=1, resource=src_view),
-            ],
-        )
+        entries = [wgpu.BindGroupEntry(binding=1, resource=src_view)]
+        if texture_format_is_filterable(texture._wgpu_object.format):
+            entries.insert(0, wgpu.BindGroupEntry(binding=0, resource=mipmap_sampler))
+        bind_group = device.create_bind_group(layout=bind_group_layout, entries=entries)
         setattr(texture, key, bind_group)
 
     return bind_group, dst_view
@@ -172,7 +192,11 @@ def get_mipmap_pipeline(device, texture):
     if pipeline is None:
         vertex_module = device.create_shader_module(code=mipmap_vertex_source)
 
-        frag_module = device.create_shader_module(code=mipmap_fragment_source)
+        frag_module = device.create_shader_module(
+            code=mipmap_fragment_source
+            if texture_format_is_filterable(format)
+            else mipmap_fragment_source_load
+        )
 
         pipeline = device.create_render_pipeline(
             layout="auto",

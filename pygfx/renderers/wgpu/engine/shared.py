@@ -3,6 +3,7 @@ A global object shared by all renderers.
 """
 
 import os
+import inspect
 
 import wgpu
 
@@ -28,23 +29,39 @@ stdinfo_uniform_type = dict(
 )
 
 
+def _has_preferred_features():
+    return (
+        "preferred_features"
+        in inspect.signature(wgpu.utils.device.preconfigure_default_device).parameters
+    )
+
+
 def _preconfigure_wgpu_device():
+
+    # PyGfx uses 'float32-filterable' when it is available, because vanilla
+    # WebGPU does not support interpolating samplers for float32 textures,
+    # which is sad for e.g. volume rendering. When it is not available (e.g.
+    # the PowerVR GPU of the Pixel 10, some Mali GPUs), float32 textures are
+    # declared unfilterable, and interpolated in the shader instead (images,
+    # volumes, colormaps), or sampled with 'nearest' (see
+    # ``sampler_for_texture()``). wgpu-py < 0.32 has no preferred_features:
+    # there the feature stays required.
+    if _has_preferred_features():
+        wgpu.preconfigure_default_device(
+            "pygfx", preferred_features={"float32-filterable"}
+        )
+    else:
+        wgpu.preconfigure_default_device(
+            "pygfx", required_features={"float32-filterable"}
+        )
 
     wgpu.preconfigure_default_device(
         "pygfx",
         required_features={
-            # PyGfx needs 'float32-filterable' because vanilla WGPU does not support
-            # interpolating samplers for float32 textures, which is sad for e.g. volume
-            # rendering. Technically we can check if the feature is available and fall back
-            # (in some way) when it's not available, but this easily results in complex
-            # code. I think we can probably get away with requiring only a few features that
-            # are available on the main target platforms.
-            "float32-filterable",
-            # Similarly 'depth32float-stencil8' is required to enable stenciling with a
-            # guaranteed 32bit depth buffer. The set of devices that does not support this
-            # is more or less a subset of those that don't support 'float32-filterable'.
-            # We *could* use 'depth24plus_stencil8' (which would be 32bit on desktop) but it would
-            # make some code (snapshot) more complex (f32 vs unorm).
+            # 'depth32float-stencil8' is required to enable stenciling with a
+            # guaranteed 32bit depth buffer. We *could* use 'depth24plus_stencil8'
+            # (which would be 32bit on desktop) but it would make some code
+            # (snapshot) more complex (f32 vs unorm).
             "depth32float-stencil8",
         },
     )
@@ -228,10 +245,11 @@ def enable_wgpu_features(*features):
     breaks that promise, and may cause your code to not work on e.g.
     mobile devices or certain operating systems.
 
-    Features can also be turned off by prefixing with "!". This e.g. allows
-    using a subset of Pygfx on old hardware by using
-    ``enable_wgpu_features("!float32-filterable")``. Use with care; some parts
-    of Pygfx will not function without the default features enabled.
+    Features can also be turned off by prefixing with "!". E.g.
+    ``enable_wgpu_features("!float32-filterable")`` renders as on a device
+    without that feature: float32 images, volumes and colormaps are then
+    interpolated in the shader, and float32 texture maps of meshes, background
+    images and sprites are sampled with 'nearest'.
 
     This function must be called before before the first ``Renderer`` is created.
     It can be called multiple times to enable more features. Note that feature names
@@ -246,6 +264,10 @@ def enable_wgpu_features(*features):
     * https://docs.rs/wgpu/latest/wgpu/struct.Features.html for the features and their limitations in wgpu-core.
     """
     wgpu.preconfigure_default_device("pygfx", required_features=features)
+    # A feature that pygfx only prefers (float32-filterable) is turned off there too.
+    features_off = {f for f in features if f.startswith("!")}
+    if features_off and _has_preferred_features():
+        wgpu.preconfigure_default_device("pygfx", preferred_features=features_off)
 
 
 def set_wgpu_limits(**limits):
@@ -266,6 +288,18 @@ def set_wgpu_limits(**limits):
     * https://gpuweb.github.io/gpuweb/#limits for the official webgpu limits.
     """
     wgpu.preconfigure_default_device("pygfx", required_limits=limits)
+
+
+def texture_format_is_filterable(format):
+    """Whether a texture of this (wgpu) format can be sampled with filtering.
+
+    In WebGPU every float format is filterable, except the 32-bit float ones,
+    which need the 'float32-filterable' feature.
+    """
+    format = str(format)
+    if "32float" not in format:
+        return True
+    return "float32-filterable" in get_shared().device.features
 
 
 def get_shared():
