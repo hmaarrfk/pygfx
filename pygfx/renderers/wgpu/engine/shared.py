@@ -3,14 +3,15 @@ A global object shared by all renderers.
 """
 
 import os
+import inspect
 
 import wgpu
 
 from ....resources import Buffer, Resource
-from ....utils import array_from_shadertype
+from ....utils import array_from_shadertype, logger
 from ....utils.text import glyph_atlas
 from ....utils.trackable import Trackable
-from .utils import gpu_caches
+from .utils import gpu_caches, ALTTEXFORMAT
 
 # Definition uniform struct with standard info related to transforms,
 # provided to each shader as uniform at slot 0.
@@ -28,23 +29,36 @@ stdinfo_uniform_type = dict(
 )
 
 
+# wgpu-py >= 0.32 can prefer features: use them if the adapter has them
+_HAS_PREFERRED_FEATURES = (
+    "preferred_features"
+    in inspect.signature(wgpu.utils.device.preconfigure_default_device).parameters
+)
+
+
 def _preconfigure_wgpu_device():
+
+    # 'float32-filterable' (filtering samplers for float32 textures) is
+    # preferred, not required. Without it (e.g. some mobile GPUs) float32
+    # textures are bound unfilterable, and interpolated in the shader or sampled
+    # with 'nearest' (see binding.sampler_binding_for_texture). With wgpu-py <
+    # 0.32 it stays required.
+    if _HAS_PREFERRED_FEATURES:
+        wgpu.preconfigure_default_device(
+            "pygfx", preferred_features={"float32-filterable"}
+        )
+    else:
+        wgpu.preconfigure_default_device(
+            "pygfx", required_features={"float32-filterable"}
+        )
 
     wgpu.preconfigure_default_device(
         "pygfx",
         required_features={
-            # PyGfx needs 'float32-filterable' because vanilla WGPU does not support
-            # interpolating samplers for float32 textures, which is sad for e.g. volume
-            # rendering. Technically we can check if the feature is available and fall back
-            # (in some way) when it's not available, but this easily results in complex
-            # code. I think we can probably get away with requiring only a few features that
-            # are available on the main target platforms.
-            "float32-filterable",
-            # Similarly 'depth32float-stencil8' is required to enable stenciling with a
-            # guaranteed 32bit depth buffer. The set of devices that does not support this
-            # is more or less a subset of those that don't support 'float32-filterable'.
-            # We *could* use 'depth24plus_stencil8' (which would be 32bit on desktop) but it would
-            # make some code (snapshot) more complex (f32 vs unorm).
+            # 'depth32float-stencil8' is required to enable stenciling with a
+            # guaranteed 32bit depth buffer. We *could* use 'depth24plus_stencil8'
+            # (which would be 32bit on desktop) but it would make some code
+            # (snapshot) more complex (f32 vs unorm).
             "depth32float-stencil8",
         },
     )
@@ -220,7 +234,8 @@ def select_adapter(adapter):
 def enable_wgpu_features(*features):
     """Enable specific features (as strings) on the wgpu device.
 
-    This is an alias to ``wgpu.preconfigure_default_device(.., required_features=...)``.
+    This calls ``wgpu.preconfigure_default_device(.., required_features=...)``;
+    features turned off with "!" are also passed as ``preferred_features``.
 
     WARNING: enabling features means that your code may not work on all
     devices. The point of wgpu is that it can make a promise that a
@@ -228,10 +243,13 @@ def enable_wgpu_features(*features):
     breaks that promise, and may cause your code to not work on e.g.
     mobile devices or certain operating systems.
 
-    Features can also be turned off by prefixing with "!". This e.g. allows
-    using a subset of Pygfx on old hardware by using
-    ``enable_wgpu_features("!float32-filterable")``. Use with care; some parts
-    of Pygfx will not function without the default features enabled.
+    Features can also be turned off by prefixing with "!". Use with care; some
+    parts of Pygfx will not function without the default features enabled
+    (e.g. "!depth32float-stencil8"). An exception is
+    ``enable_wgpu_features("!float32-filterable")``, which renders as on a
+    device without that feature: float32 images, volumes and colormaps are
+    then interpolated in the shader, and float32 texture maps of meshes,
+    background images and sprites are sampled with 'nearest'.
 
     This function must be called before before the first ``Renderer`` is created.
     It can be called multiple times to enable more features. Note that feature names
@@ -246,6 +264,10 @@ def enable_wgpu_features(*features):
     * https://docs.rs/wgpu/latest/wgpu/struct.Features.html for the features and their limitations in wgpu-core.
     """
     wgpu.preconfigure_default_device("pygfx", required_features=features)
+    # A feature that pygfx only prefers (float32-filterable) is turned off there too.
+    features_off = {f for f in features if f.startswith("!")}
+    if features_off and _HAS_PREFERRED_FEATURES:
+        wgpu.preconfigure_default_device("pygfx", preferred_features=features_off)
 
 
 def set_wgpu_limits(**limits):
@@ -266,6 +288,143 @@ def set_wgpu_limits(**limits):
     * https://gpuweb.github.io/gpuweb/#limits for the official webgpu limits.
     """
     wgpu.preconfigure_default_device("pygfx", required_limits=limits)
+
+
+# Which texture formats WebGPU can sample with a filtering sampler: the
+# "Filterable" column of the texture format capabilities table of the WebGPU
+# spec (https://gpuweb.github.io/gpuweb/#texture-format-caps).
+#
+# Filterable in core WebGPU, on every device:
+TEXTURE_FORMATS_FILTERABLE = {
+    "r8unorm",
+    "r8snorm",
+    "r16float",
+    "rg8unorm",
+    "rg8snorm",
+    "rg16float",
+    "rgba8unorm",
+    "rgba8unorm-srgb",
+    "rgba8snorm",
+    "bgra8unorm",
+    "bgra8unorm-srgb",
+    "rgb9e5ufloat",
+    "rgb10a2unorm",
+    "rg11b10ufloat",
+    "rgba16float",
+}
+
+# Filterable only with a feature, any one of those listed. float32 exists on
+# every device; filtering it is the 'float32-filterable' feature. The 16-bit
+# norm formats exist with 'texture-formats-tier1', but Dawn binds them as
+# unfilterable-float unless it has 'unorm16-filterable' (there is no snorm
+# one); wgpu-native's 'texture-format16bit-norm' makes them filterable. The
+# compressed formats exist only with their feature, and are then filterable.
+_UNORM16 = ("unorm16-filterable", "texture-format16bit-norm")
+_SNORM16 = ("texture-format16bit-norm",)
+TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE = {
+    "r32float": ("float32-filterable",),
+    "rg32float": ("float32-filterable",),
+    "rgba32float": ("float32-filterable",),
+    "r16unorm": _UNORM16,
+    "r16snorm": _SNORM16,
+    "rg16unorm": _UNORM16,
+    "rg16snorm": _SNORM16,
+    "rgba16unorm": _UNORM16,
+    "rgba16snorm": _SNORM16,
+}
+for _format in wgpu.TextureFormat:
+    for _prefix, _feature in [
+        ("bc", "texture-compression-bc"),
+        ("etc2-", "texture-compression-etc2"),
+        ("eac-", "texture-compression-etc2"),
+        ("astc-", "texture-compression-astc"),
+    ]:
+        if _format.startswith(_prefix):
+            TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE[_format] = (_feature,)
+
+# Never filterable: integer, depth and stencil formats
+TEXTURE_FORMATS_UNFILTERABLE = {
+    f
+    for f in wgpu.TextureFormat
+    if f.endswith(("uint", "sint")) or "depth" in f or "stencil" in f
+}
+
+_warned_unknown_formats = set()
+
+
+def texture_format_is_filterable(format):
+    """Whether a texture of this (wgpu) format can be sampled with filtering.
+
+    Formats that core WebGPU can filter are filterable. Formats that need a
+    feature to be filtered (float32: 'float32-filterable') are filterable if
+    the device has that feature. Integer, depth and stencil formats are not.
+    A format that is in none of these (one that this function does not know
+    yet) is taken to be unfilterable, with a warning.
+    """
+    # pygfx stores its 3-channel formats (rgb8unorm, ...) as 4-channel ones
+    format = ALTTEXFORMAT.get(str(format), [str(format)])[0]
+    if format in TEXTURE_FORMATS_FILTERABLE:
+        return True
+    if format in TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE:
+        features = get_shared().device.features
+        return any(
+            f in features for f in TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE[format]
+        )
+    if (
+        format not in TEXTURE_FORMATS_UNFILTERABLE
+        and format not in _warned_unknown_formats
+    ):
+        _warned_unknown_formats.add(format)
+        logger.warning(
+            f"Texture format {format!r} is unknown to pygfx: "
+            "assuming that it cannot be sampled with filtering."
+        )
+    return False
+
+
+def features_to_filter(format):
+    """The features of which the device needs one to filter this format, or ()."""
+    format = ALTTEXFORMAT.get(str(format), [str(format)])[0]
+    return TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE.get(format, ())
+
+
+def texture_sample_type(format):
+    """The sample type with which to bind a texture of this format.
+
+    Filterable formats are "float". A format that is filterable only with a
+    feature that the device lacks (float32 without 'float32-filterable') is
+    "unfilterable-float": the shader then reads it with textureLoad, or with
+    a non-filtering sampler (``binding.sampler_binding_for_texture()``).
+    """
+    format = ALTTEXFORMAT.get(str(format), [str(format)])[0]
+    # Depth first: depth32float and depth16unorm are not float textures
+    if "depth" in format:
+        return wgpu.TextureSampleType.depth
+    elif format.endswith("uint") or format == "stencil8":
+        return wgpu.TextureSampleType.uint
+    elif format.endswith("sint"):
+        return wgpu.TextureSampleType.sint
+    elif texture_format_is_filterable(format):
+        return wgpu.TextureSampleType.float
+    elif format in TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE:
+        return wgpu.TextureSampleType.unfilterable_float
+    raise ValueError(f"Could not determine texture sample type of {format!r}.")
+
+
+def sampler_can_interpolate(format, interpolation):
+    """Whether a sampler can do this interpolation of a texture of this format.
+
+    For images and volumes: they interpolate their data with a sampler when
+    they can, and else in the shader, reading the texels with textureLoad.
+    A sampler only knows 'nearest' and 'linear' (the shader does 'cubic' and
+    the others). And images and volumes always bind a *filtering* sampler, so
+    even 'nearest' needs a format that the device can filter: not integer
+    data, nor float32 data on a device without the 'float32-filterable'
+    feature. The shader does 'nearest' for those.
+    """
+    return interpolation in ("nearest", "linear") and texture_format_is_filterable(
+        format
+    )
 
 
 def get_shared():

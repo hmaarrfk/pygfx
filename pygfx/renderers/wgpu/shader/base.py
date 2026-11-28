@@ -6,6 +6,7 @@ WGSL code, as well as providing the information to connect it to the resources
 
 from ....resources import Buffer, Texture
 from ..engine.utils import (
+    ADDRESS_MODES,
     GfxSampler,
     GfxTextureView,
     to_vertex_format,
@@ -13,9 +14,14 @@ from ..engine.utils import (
     hash_from_value,
 )
 from ..engine.binding import Binding
+from ..engine.shared import texture_sample_type
+from ....utils import logger
 from .resolve import resolve_shadercode
 from .bindings import BindingDefinitions
 from .templating import apply_templating
+
+
+_warned_colormap_mipmaps = set()
 
 
 class ShaderInterface:
@@ -256,11 +262,7 @@ class BaseShader(ShaderInterface):
         textures, different texture formats.
         """
 
-        filter_mode = f"{map.mag_filter}, {map.min_filter}, {map.mipmap_filter}"
-        address_mode = f"{map.wrap_s}, {map.wrap_t}"
-
-        sampler = GfxSampler(filter_mode, address_mode)
-        texture_view = self._define_colormap_texture(map.texture)
+        texture_view = self._define_colormap_texture(map)
 
         # Check that texture dim matches texcoords
         if not isinstance(texcoords, Buffer):
@@ -275,7 +277,7 @@ class BaseShader(ShaderInterface):
 
         # Return bindings
         return [
-            Binding("s_colormap", "sampler/filtering", sampler, "FRAGMENT"),
+            self._define_colormap_sampler(map),
             Binding("t_colormap", "texture/auto", texture_view, "FRAGMENT"),
             Binding("u_colormap", "buffer/uniform", map.uniform_buffer, "FRAGMENT"),
         ]
@@ -287,11 +289,7 @@ class BaseShader(ShaderInterface):
         Returns a list of bindings.
         """
 
-        filter_mode = f"{map.mag_filter}, {map.min_filter}, {map.mipmap_filter}"
-        address_mode = f"{map.wrap_s}, {map.wrap_t}"
-
-        sampler = GfxSampler(filter_mode, address_mode)
-        texture_view = self._define_colormap_texture(map.texture)
+        texture_view = self._define_colormap_texture(map)
 
         # Check that texture dim matches image channels
         if int(texture_view.view_dim[0]) != self["img_nchannels"]:
@@ -301,12 +299,23 @@ class BaseShader(ShaderInterface):
 
         # Return bindings
         return [
-            Binding("s_colormap", "sampler/filtering", sampler, "FRAGMENT"),
+            self._define_colormap_sampler(map),
             Binding("t_colormap", "texture/auto", texture_view, "FRAGMENT"),
             Binding("u_colormap", "buffer/uniform", map.uniform_buffer, "FRAGMENT"),
         ]
 
-    def _define_colormap_texture(self, texture):
+    def _define_colormap_sampler(self, map):
+        address_mode = f"{map.wrap_s}, {map.wrap_t}"
+        if self["colormap_format"] == "f32-load":
+            # Unused: the shader reads the texels (see _define_colormap_texture)
+            sampler = GfxSampler("nearest", address_mode)
+            return Binding("s_colormap", "sampler/non_filtering", sampler, "FRAGMENT")
+        filter_mode = f"{map.mag_filter}, {map.min_filter}, {map.mipmap_filter}"
+        sampler = GfxSampler(filter_mode, address_mode)
+        return Binding("s_colormap", "sampler/filtering", sampler, "FRAGMENT")
+
+    def _define_colormap_texture(self, map):
+        texture = map.texture
         # Get texture view
         if not isinstance(texture, Texture):
             raise TypeError("texture must be a Texture")
@@ -323,9 +332,27 @@ class BaseShader(ShaderInterface):
         }[view_dim]
         # Sampling type
         fmt = to_texture_format(texture_view.format)
-        if "norm" in fmt or "float" in fmt:
+        sample_type = texture_sample_type(fmt)
+        if sample_type == "float":
             self["colormap_format"] = "f32"
-        elif "uint" in fmt:
+        elif sample_type == "unfilterable-float":
+            # float32 without the 'float32-filterable' feature: the shader
+            # reads the texels, and wraps and filters as the sampler would
+            # (colormap.wgsl). Wrap modes by wgpu's names, as GfxSampler gives
+            # them to the sampler; z repeats the last mode, as it does.
+            self["colormap_format"] = "f32-load"
+            wraps = [ADDRESS_MODES.get(w, w) for w in (map.wrap_s, map.wrap_t)]
+            self["colormap_wrap"] = [*wraps, wraps[-1]]
+            self["colormap_mag_filter"] = map.mag_filter
+            self["colormap_min_filter"] = map.min_filter
+            if texture.generate_mipmaps and fmt not in _warned_colormap_mipmaps:
+                _warned_colormap_mipmaps.add(fmt)
+                logger.warning(
+                    f"The device cannot filter {fmt} textures (no "
+                    "'float32-filterable' feature): colormaps of this format "
+                    "are read from their first mip level only."
+                )
+        elif sample_type == "uint":
             self["colormap_format"] = "u32"
         else:
             self["colormap_format"] = "i32"

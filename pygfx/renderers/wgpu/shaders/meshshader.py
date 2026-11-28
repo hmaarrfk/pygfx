@@ -23,9 +23,9 @@ from .. import (
     Binding,
     nchannels_from_format,
     to_texture_format,
-    GfxSampler,
     GfxTextureView,
     load_wgsl,
+    sampler_binding_for_texture,
 )
 
 
@@ -99,12 +99,13 @@ class MeshShader(BaseShader):
 
         filter_mode = f"{map.mag_filter}, {map.min_filter}, {map.mipmap_filter}"
         address_mode = f"{map.wrap_s}, {map.wrap_t}"
-        sampler = GfxSampler(filter_mode, address_mode)
 
         self[f"{name}_uv"] = map.uv_channel
 
         bindings = [
-            Binding(f"s_{name}", "sampler/filtering", sampler, "FRAGMENT"),
+            sampler_binding_for_texture(
+                f"s_{name}", filter_mode, address_mode, view, "FRAGMENT"
+            ),
             Binding(f"t_{name}", "texture/auto", view, "FRAGMENT"),
         ]
 

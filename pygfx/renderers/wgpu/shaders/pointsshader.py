@@ -19,8 +19,8 @@ from .. import (
     load_wgsl,
     nchannels_from_format,
     to_texture_format,
-    GfxSampler,
     GfxTextureView,
+    sampler_binding_for_texture,
 )
 
 renderer_uniform_type = dict(last_i="i4")
@@ -167,7 +167,6 @@ class PointsShader(BaseShader):
 
         # Process sprite texture. Note that we can *also* have a colormap for the base color.
         if self["is_sprite"] == 2:
-            sprite_sampler = GfxSampler("linear", "clamp")
             if not isinstance(material.sprite, Texture):
                 raise TypeError("material sprite must be a Texture")
             sprite_view = GfxTextureView(material.sprite)
@@ -178,7 +177,9 @@ class PointsShader(BaseShader):
                 raise ValueError("Sprite textures must be u8norm or float")
             self["sprite_nchannels"] = len(fmt) - len(fmt.lstrip("rgba"))
             bindings += [
-                Binding("s_sprite", "sampler/filtering", sprite_sampler, "FRAGMENT"),
+                sampler_binding_for_texture(
+                    "s_sprite", "linear", "clamp", sprite_view, "FRAGMENT"
+                ),
                 Binding("t_sprite", "texture/auto", sprite_view, "FRAGMENT"),
             ]
 
