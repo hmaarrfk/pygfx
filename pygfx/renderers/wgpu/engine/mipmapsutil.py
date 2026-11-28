@@ -79,15 +79,6 @@ mipmap_fragment_source_load = """
 """
 
 
-def _mipmaps_with_sampler(format):
-    """Whether mipmaps of this format are made with the linear sampler.
-
-    Else with ``mipmap_fragment_source_load``. The pipeline and the bind group
-    must agree on it.
-    """
-    return texture_format_is_filterable(format)
-
-
 def get_mip_level_count(texture):
     """Get the number of mipmap levels from the texture size."""
     if not isinstance(texture, Texture):
@@ -120,8 +111,11 @@ def generate_texture_mipmaps(target):
 
 def generate_mipmaps(texture, base_array_layer):
     device = get_shared().device
+    # Average with the linear sampler, or (for a format that the device cannot
+    # filter) with textureLoad: the pipeline and the bind groups must agree.
+    with_sampler = texture_format_is_filterable(texture._wgpu_object.format)
 
-    pipeline = get_mipmap_pipeline(device, texture)
+    pipeline = get_mipmap_pipeline(device, texture, with_sampler)
 
     command_encoder: "wgpu.GPUCommandEncoder" = device.create_command_encoder()
     bind_group_layout = pipeline.get_bind_group_layout(0)
@@ -132,7 +126,13 @@ def generate_mipmaps(texture, base_array_layer):
     for i in range(1, texture._wgpu_mip_level_count):
         dst_size = dst_size[0] // 2, dst_size[1] // 2
         bind_group, prev_view = get_bind_group(
-            device, texture, bind_group_layout, base_array_layer, i, prev_view
+            device,
+            texture,
+            bind_group_layout,
+            base_array_layer,
+            i,
+            prev_view,
+            with_sampler,
         )
         pass_encoder = command_encoder.begin_render_pass(
             color_attachments=[
@@ -154,7 +154,13 @@ def generate_mipmaps(texture, base_array_layer):
 
 
 def get_bind_group(
-    device, texture, bind_group_layout, base_array_layer, mip_level, src_view
+    device,
+    texture,
+    bind_group_layout,
+    base_array_layer,
+    mip_level,
+    src_view,
+    with_sampler=True,
 ):
     # Get the bind group that includes the two subsequent texture views.
     # We cache this on the texture object to avoid re-creating the views
@@ -186,7 +192,7 @@ def get_bind_group(
             mipmap_sampler = device.create_sampler(min_filter="linear")
 
         entries = [wgpu.BindGroupEntry(binding=1, resource=src_view)]
-        if _mipmaps_with_sampler(texture._wgpu_object.format):
+        if with_sampler:  # mipmap_fragment_source_load has no binding 0
             entries.append(wgpu.BindGroupEntry(binding=0, resource=mipmap_sampler))
         bind_group = device.create_bind_group(layout=bind_group_layout, entries=entries)
         setattr(texture, key, bind_group)
@@ -194,14 +200,14 @@ def get_bind_group(
     return bind_group, dst_view
 
 
-def get_mipmap_pipeline(device, texture):
+def get_mipmap_pipeline(device, texture, with_sampler=True):
     format = texture._wgpu_object.format
     pipeline = MIPMAP_CACHE.get(format)
 
     if pipeline is None:
         vertex_module = device.create_shader_module(code=mipmap_vertex_source)
 
-        if _mipmaps_with_sampler(format):
+        if with_sampler:
             frag_source = mipmap_fragment_source
         else:
             frag_source = mipmap_fragment_source_load

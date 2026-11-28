@@ -14,7 +14,7 @@ from ..engine.utils import (
     hash_from_value,
 )
 from ..engine.binding import Binding
-from ..engine.shared import texture_format_is_filterable
+from ..engine.shared import texture_sample_type
 from .resolve import resolve_shadercode
 from .bindings import BindingDefinitions
 from .templating import apply_templating
@@ -326,22 +326,24 @@ class BaseShader(ShaderInterface):
         }[view_dim]
         # Sampling type
         fmt = to_texture_format(texture_view.format)
-        if "norm" in fmt or "float" in fmt:
-            if texture_format_is_filterable(fmt):
-                self["colormap_format"] = "f32"  # textureSample
-            else:
-                # float32 without the 'float32-filterable' feature: the shader
-                # reads the texels, and wraps and interpolates as the sampler
-                # would (colormap.wgsl).
-                self["colormap_format"] = "f32-load"
-                # The names of wgpu's address modes, as GfxSampler gives
-                # them to the sampler; z repeats the last mode, as it does.
-                wraps = [ADDRESS_MODES.get(w, w) for w in (map.wrap_s, map.wrap_t)]
-                self["colormap_wrap"] = [*wraps, wraps[-1]]
-                # One filter: the shader does not know whether a fragment
-                # magnifies or minifies (colormaps have no mipmaps).
-                self["colormap_filter"] = map.mag_filter
-        elif "uint" in fmt:
+        sample_type = texture_sample_type(fmt)
+        if sample_type == "float":
+            self["colormap_format"] = "f32"  # textureSample
+        elif sample_type == "unfilterable-float":
+            # float32 without the 'float32-filterable' feature: the shader
+            # reads the texels, and wraps and interpolates as the sampler would
+            # (colormap.wgsl). The colormap's filtering sampler stays in the
+            # bindings; that is valid as long as no textureSample uses the two
+            # together, and keeps the bindings the same on every device.
+            self["colormap_format"] = "f32-load"
+            # The names of wgpu's address modes, as GfxSampler gives
+            # them to the sampler; z repeats the last mode, as it does.
+            wraps = [ADDRESS_MODES.get(w, w) for w in (map.wrap_s, map.wrap_t)]
+            self["colormap_wrap"] = [*wraps, wraps[-1]]
+            # One filter: the shader does not know whether a fragment
+            # magnifies or minifies (colormaps have no mipmaps).
+            self["colormap_filter"] = map.mag_filter
+        elif sample_type == "uint":
             self["colormap_format"] = "u32"
         else:
             self["colormap_format"] = "i32"

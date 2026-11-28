@@ -4,7 +4,7 @@ from ....objects import Volume
 from ....materials import VolumeSliceMaterial, VolumeRayMaterial
 from ....resources import Texture
 
-from ..engine.shared import sampler_can_interpolate
+from ..engine.shared import sampler_can_interpolate, texture_sample_type
 from .. import (
     register_wgpu_render_function,
     BaseShader,
@@ -35,12 +35,14 @@ class BaseVolumeShader(BaseShader):
         # Set image format
         self["climcorrection"] = ""
         fmt = to_texture_format(geometry.grid.format)
-        if "norm" in fmt or "float" in fmt:
+        sample_type = texture_sample_type(fmt)
+        # Float data, filterable or not (float32 without 'float32-filterable')
+        if sample_type in ("float", "unfilterable-float"):
             self["img_format"] = "f32"
             map = {"8unorm": 255, "8snorm": 127, "16unorm": 65536, "16snorm": 32767}
             fmt_colorless = fmt.lstrip("rgba").split("-")[0]
             self["climcorrection"] = " * " + str(float(map.get(fmt_colorless, 1)))
-        elif "uint" in fmt:
+        elif sample_type == "uint":
             self["img_format"] = "u32"
         else:
             self["img_format"] = "i32"
