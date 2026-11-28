@@ -128,8 +128,7 @@ fn sample_im(texcoord: vec2<f32>, sizef: vec2<f32>) -> vec4<f32> {
         $$ else
             p = vec2<i32>(texcoord.xy * sizef.xy);
             weight = 1.0;
-            // clamp: texcoord 1.0 is just past the last texel
-            value = vec4<f32>(textureLoad(t_img, clamp(p, min_coord, max_coord), 0));
+            value = vec4<f32>(textureLoad(t_img, p, 0));
         $$ endif
 
         return value / weight;
