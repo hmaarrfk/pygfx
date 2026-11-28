@@ -6,7 +6,10 @@ from ....utils import logger
 
 from .utils import to_texture_format, GfxSampler, GfxTextureView
 from .update import ensure_wgpu_object, ALTTEXFORMAT
-from .shared import texture_format_is_filterable
+from .shared import (
+    TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE,
+    texture_format_is_filterable,
+)
 
 
 visibility_render = wgpu.ShaderStage.VERTEX | wgpu.ShaderStage.FRAGMENT
@@ -21,10 +24,10 @@ _warned_unfilterable = set()
 def sampler_binding_for_texture(name, filter, address_mode, view, visibility):
     """Get the Binding for a sampler that samples the given texture view.
 
-    Normally a filtering sampler with the given filter. Without the
-    'float32-filterable' feature, a float32 texture cannot be sampled with a
-    filtering sampler: it then gets a non-filtering one, with 'nearest', and a
-    warning (once per format) if that changes the requested filter. Shaders
+    Normally a filtering sampler with the given filter. A texture whose format
+    the device cannot filter (float32 without the 'float32-filterable'
+    feature) gets a non-filtering one, with 'nearest', and a warning (once per
+    format) if that changes the requested filter. Shaders
     that can interpolate in the shader (images, volumes, colormaps) use
     textureLoad instead, and do not need this.
     """
@@ -36,10 +39,11 @@ def sampler_binding_for_texture(name, filter, address_mode, view, visibility):
         )
     if "linear" in filter and fmt not in _warned_unfilterable:
         _warned_unfilterable.add(fmt)
+        features = TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE.get(fmt)
+        why = f"no {' or '.join(map(repr, features))} feature" if features else "never"
         logger.warning(
-            f"The device cannot filter {fmt} textures (no 'float32-filterable' "
-            f"feature): {name} samples with 'nearest' instead of '{filter}'. "
-            "Use float16 data for smooth sampling on such devices."
+            f"The device cannot filter {fmt} textures ({why}): "
+            f"{name} samples with 'nearest' instead of '{filter}'."
         )
     return Binding(
         name, "sampler/non_filtering", GfxSampler("nearest", address_mode), visibility

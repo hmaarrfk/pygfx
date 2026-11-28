@@ -8,7 +8,7 @@ import inspect
 import wgpu
 
 from ....resources import Buffer, Resource
-from ....utils import array_from_shadertype
+from ....utils import array_from_shadertype, logger
 from ....utils.text import glyph_atlas
 from ....utils.trackable import Trackable
 from .utils import gpu_caches
@@ -290,16 +290,92 @@ def set_wgpu_limits(**limits):
     wgpu.preconfigure_default_device("pygfx", required_limits=limits)
 
 
+# Which texture formats WebGPU can sample with a filtering sampler: the
+# "Filterable" column of the texture format capabilities table of the WebGPU
+# spec (https://gpuweb.github.io/gpuweb/#texture-format-caps).
+#
+# Filterable in core WebGPU, on every device:
+TEXTURE_FORMATS_FILTERABLE = {
+    "r8unorm",
+    "r8snorm",
+    "r16float",
+    "rg8unorm",
+    "rg8snorm",
+    "rg16float",
+    "rgba8unorm",
+    "rgba8unorm-srgb",
+    "rgba8snorm",
+    "bgra8unorm",
+    "bgra8unorm-srgb",
+    "rgb9e5ufloat",
+    "rgb10a2unorm",
+    "rg11b10ufloat",
+    "rgba16float",
+}
+
+# Filterable only with a feature. For float32 the format exists on every
+# device, but filtering it is the 'float32-filterable' feature. The others only
+# exist with their feature, and are then filterable. Any one of the features
+# of a format will do (wgpu-native has its own name for the 16-bit norm one).
+_NORM16 = ("texture-formats-tier1", "texture-format16bit-norm")
+TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE = {
+    "r32float": ("float32-filterable",),
+    "rg32float": ("float32-filterable",),
+    "rgba32float": ("float32-filterable",),
+    "r16unorm": _NORM16,
+    "r16snorm": _NORM16,
+    "rg16unorm": _NORM16,
+    "rg16snorm": _NORM16,
+    "rgba16unorm": _NORM16,
+    "rgba16snorm": _NORM16,
+}
+for _format in wgpu.TextureFormat:
+    for _prefix, _feature in [
+        ("bc", "texture-compression-bc"),
+        ("etc2-", "texture-compression-etc2"),
+        ("eac-", "texture-compression-etc2"),
+        ("astc-", "texture-compression-astc"),
+    ]:
+        if _format.startswith(_prefix):
+            TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE[_format] = (_feature,)
+
+# Never filterable: integer, depth and stencil formats
+TEXTURE_FORMATS_UNFILTERABLE = {
+    f
+    for f in wgpu.TextureFormat
+    if f.endswith(("uint", "sint")) or "depth" in f or "stencil" in f
+}
+
+_warned_unknown_formats = set()
+
+
 def texture_format_is_filterable(format):
     """Whether a texture of this (wgpu) format can be sampled with filtering.
 
-    In WebGPU every float format is filterable, except the 32-bit float ones,
-    which need the 'float32-filterable' feature.
+    Formats that core WebGPU can filter are filterable. Formats that need a
+    feature to be filtered (float32: 'float32-filterable') are filterable if
+    the device has that feature. Integer, depth and stencil formats are not.
+    A format that is in none of these (one that this function does not know
+    yet) is taken to be unfilterable, with a warning.
     """
     format = str(format)
-    if "32float" not in format:
+    if format in TEXTURE_FORMATS_FILTERABLE:
         return True
-    return "float32-filterable" in get_shared().device.features
+    if format in TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE:
+        features = get_shared().device.features
+        return any(
+            f in features for f in TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE[format]
+        )
+    if (
+        format not in TEXTURE_FORMATS_UNFILTERABLE
+        and format not in _warned_unknown_formats
+    ):
+        _warned_unknown_formats.add(format)
+        logger.warning(
+            f"Texture format {format!r} is unknown to pygfx: "
+            "assuming that it cannot be sampled with filtering."
+        )
+    return False
 
 
 def get_shared():

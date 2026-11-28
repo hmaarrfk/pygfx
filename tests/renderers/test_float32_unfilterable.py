@@ -173,3 +173,29 @@ assert len(np.unique(im[..., :3].reshape(-1, 3), axis=0)) == 16, "not nearest"
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "samples with 'nearest'" in result.stderr
+
+
+def test_every_texture_format_is_classified():
+    import wgpu
+    from pygfx.renderers.wgpu.engine import shared
+
+    tables = [
+        shared.TEXTURE_FORMATS_FILTERABLE,
+        set(shared.TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE),
+        shared.TEXTURE_FORMATS_UNFILTERABLE,
+    ]
+    # Each format of wgpu is in exactly one table, and the tables have no others
+    assert sorted(f for t in tables for f in t) == sorted(wgpu.TextureFormat)
+    features = set(wgpu.FeatureName) | {"texture-format16bit-norm"}  # wgpu-native
+    for needed in shared.TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE.values():
+        assert set(needed) <= features
+
+
+def test_unknown_texture_format_is_unfilterable_with_warning(caplog):
+    from pygfx.renderers.wgpu.engine.shared import texture_format_is_filterable
+
+    assert texture_format_is_filterable("rgba8unorm")
+    assert not texture_format_is_filterable("r32uint")
+    assert not caplog.records
+    assert not texture_format_is_filterable("r64fancyfloat")
+    assert "unknown to pygfx" in caplog.text
