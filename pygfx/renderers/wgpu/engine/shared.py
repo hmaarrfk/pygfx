@@ -11,7 +11,7 @@ from ....resources import Buffer, Resource
 from ....utils import array_from_shadertype, logger
 from ....utils.text import glyph_atlas
 from ....utils.trackable import Trackable
-from .utils import gpu_caches
+from .utils import gpu_caches, ALTTEXFORMAT
 
 # Definition uniform struct with standard info related to transforms,
 # provided to each shader as uniform at slot 0.
@@ -44,7 +44,7 @@ def _preconfigure_wgpu_device():
     # the PowerVR GPU of the Pixel 10, some Mali GPUs), float32 textures are
     # declared unfilterable, and interpolated in the shader instead (images,
     # volumes, colormaps), or sampled with 'nearest' (see
-    # ``sampler_for_texture()``). wgpu-py < 0.32 has no preferred_features:
+    # ``binding.sampler_binding_for_texture()``). wgpu-py < 0.32 has no preferred_features:
     # there the feature stays required.
     if _has_preferred_features():
         wgpu.preconfigure_default_device(
@@ -358,7 +358,8 @@ def texture_format_is_filterable(format):
     A format that is in none of these (one that this function does not know
     yet) is taken to be unfilterable, with a warning.
     """
-    format = str(format)
+    # pygfx stores its 3-channel formats (rgb8unorm, ...) as 4-channel ones
+    format = ALTTEXFORMAT.get(str(format), [str(format)])[0]
     if format in TEXTURE_FORMATS_FILTERABLE:
         return True
     if format in TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE:
@@ -378,15 +379,39 @@ def texture_format_is_filterable(format):
     return False
 
 
+def texture_sample_type(format):
+    """The sample type with which to bind a texture of this format.
+
+    Filterable formats are "float". A format that is filterable only with a
+    feature that the device lacks (float32 without 'float32-filterable') is
+    "unfilterable-float": the shader then reads it with textureLoad, or with
+    a non-filtering sampler (``binding.sampler_binding_for_texture()``).
+    """
+    format = ALTTEXFORMAT.get(str(format), [str(format)])[0]
+    # Depth first: depth32float and depth16unorm are not float textures
+    if "depth" in format:
+        return wgpu.TextureSampleType.depth
+    elif format.endswith("uint") or format == "stencil8":
+        return wgpu.TextureSampleType.uint
+    elif format.endswith("sint"):
+        return wgpu.TextureSampleType.sint
+    elif texture_format_is_filterable(format):
+        return wgpu.TextureSampleType.float
+    elif format in TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE:
+        return wgpu.TextureSampleType.unfilterable_float
+    raise ValueError(f"Could not determine texture sample type of {format!r}.")
+
+
 def sampler_can_interpolate(format, interpolation):
     """Whether a sampler can do this interpolation of a texture of this format.
 
     For images and volumes: they interpolate their data with a sampler when
     they can, and else in the shader, reading the texels with textureLoad.
     A sampler only knows 'nearest' and 'linear' (the shader does 'cubic' and
-    the others), and only for a format that the device can filter: not for
-    integer data, nor for float32 data on a device without the
-    'float32-filterable' feature.
+    the others). And images and volumes always bind a *filtering* sampler, so
+    even 'nearest' needs a format that the device can filter: not integer
+    data, nor float32 data on a device without the 'float32-filterable'
+    feature. The shader does 'nearest' for those.
     """
     return interpolation in ("nearest", "linear") and texture_format_is_filterable(
         format

@@ -7,27 +7,15 @@ import wgpu
 from ....resources import Texture, Buffer
 from ....utils import logger
 
-from .utils import to_texture_format, GfxSampler, GfxTextureView
+from .utils import (
+    to_texture_format,
+    GfxSampler,
+    GfxTextureView,
+    ALTTEXFORMAT,
+    ADDRESS_MODES,
+)
 from .mipmapsutil import get_mip_level_count, generate_texture_mipmaps
 from .shared import get_shared
-
-
-# Alternative texture formats that we support by padding channels as needed.
-# Maps virtual_format -> (wgpu_format, pad_value, nbytes)
-ALTTEXFORMAT = {
-    "rgb8snorm": ("rgba8snorm", 127, 1),
-    "rgb8unorm": ("rgba8unorm", 255, 1),
-    "rgb8sint": ("rgba8sint", 127, 1),
-    "rgb8uint": ("rgba8uint", 255, 1),
-    "rgb16snorm": ("rgba16snorm", 32767, 2),
-    "rgb16unorm": ("rgba16unorm", 65535, 2),
-    "rgb16sint": ("rgba16sint", 32767, 2),
-    "rgb16uint": ("rgba16uint", 65535, 2),
-    "rgb32sint": ("rgba32sint", 2147483647, 4),
-    "rgb32uint": ("rgba32uint", 4294967295, 4),
-    "rgb16float": ("rgba16float", 1, 2),
-    "rgb32float": ("rgba32float", 1, 4),
-}
 
 
 def update_resource(resource):
@@ -193,7 +181,7 @@ def ensure_wgpu_object(resource):
         filters = resource.filter.replace(",", " ").split() or ["nearest"]
         while len(filters) < 3:
             filters.append(filters[-1])
-        ammap = {"clamp": "clamp-to-edge", "mirror": "mirror-repeat"}
+        ammap = ADDRESS_MODES
         resource._wgpu_object = device.create_sampler(
             address_mode_u=ammap.get(amodes[0], amodes[0]),
             address_mode_v=ammap.get(amodes[1], amodes[1]),

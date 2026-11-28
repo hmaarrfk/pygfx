@@ -26,6 +26,8 @@ if not can_use_wgpu_lib:
 SCENES = [
     "image_linear",
     "image_nearest",
+    "image_rgb8",
+    "image_rgb32",
     "volume_linear",
     "colormap_1d",
     "colormap_2d",
@@ -61,6 +63,19 @@ def render_scenes(filterable):
         camera.local.position = (3.5, 3.5, 10)
         images[f"image_{interpolation}"] = render(gfx.Scene().add(image), camera)
 
+    # 3-channel data: pygfx stores it as 4-channel (rgb8unorm -> rgba8unorm)
+    for name, data in [
+        ("image_rgb8", (rng.random((8, 8, 3)) * 255).astype(np.uint8)),
+        ("image_rgb32", rng.random((8, 8, 3)).astype(np.float32)),
+    ]:
+        image = gfx.Image(
+            gfx.Geometry(grid=gfx.Texture(data, dim=2)),
+            gfx.ImageBasicMaterial(clim=(0, 1), interpolation="linear"),
+        )
+        camera = gfx.OrthographicCamera(8, 8)
+        camera.local.position = (3.5, 3.5, 10)
+        images[name] = render(gfx.Scene().add(image), camera)
+
     data = rng.random((6, 6, 6)).astype(np.float32)
     volume = gfx.Volume(
         gfx.Geometry(grid=gfx.Texture(data, dim=3)),
@@ -78,8 +93,7 @@ def render_scenes(filterable):
         scene = gfx.Scene()
         for i, wrap in enumerate(("clamp", "repeat", "mirror")):
             if dim == 1:
-                cmap = rng.random((5, 4)).astype(np.float32)
-                cmap[..., 3] = 1
+                cmap = rng.random((5, 3)).astype(np.float32)  # rgb: as rgba
                 tc = texcoords[:, 0].copy()
             elif dim == 2:
                 cmap = rng.random((4, 5)).astype(np.float32)
@@ -132,12 +146,14 @@ np.savez({out!r}, has_feature=has_feature, **images)
 
 
 def test_float32_without_filtering_matches():
-    with_feature, _ = _run(True)
+    with_feature, with_feature_stderr = _run(True)
     without, stderr = _run(False)
     if not with_feature.pop("has_feature"):
         pytest.skip("The adapter has no float32-filterable to compare with")
     assert not without.pop("has_feature")
     assert "samples with 'nearest'" not in stderr  # all interpolated in the shader
+    for out in (with_feature_stderr, stderr):
+        assert "unknown to pygfx" not in out
     for name in SCENES:
         a = with_feature[name].astype(int)
         b = without[name].astype(int)
@@ -199,3 +215,28 @@ def test_unknown_texture_format_is_unfilterable_with_warning(caplog):
     assert not caplog.records
     assert not texture_format_is_filterable("r64fancyfloat")
     assert "unknown to pygfx" in caplog.text
+
+
+def test_texture_sample_type_and_sampler_choice():
+    import wgpu
+    from pygfx.renderers.wgpu.engine import shared
+
+    def check(format, sample_type, filterable):
+        assert shared.texture_sample_type(format) == sample_type, format
+        assert shared.texture_format_is_filterable(format) == filterable, format
+
+    float32 = "float32-filterable" in shared.get_shared().device.features
+    st = wgpu.TextureSampleType
+    check("rgba8unorm", st.float, True)
+    check("rgb8unorm", st.float, True)  # pygfx's 3-channel format
+    check("rgb16float", st.float, True)
+    check("r32float", st.float if float32 else st.unfilterable_float, float32)
+    check("rgb32float", st.float if float32 else st.unfilterable_float, float32)
+    check("rgb8uint", st.uint, False)
+    check("r16sint", st.sint, False)
+    check("stencil8", st.uint, False)
+    check("depth32float", st.depth, False)
+    check("depth16unorm", st.depth, False)
+    assert shared.sampler_can_interpolate("rgb8unorm", "linear")
+    assert not shared.sampler_can_interpolate("rgb8unorm", "cubic")
+    assert not shared.sampler_can_interpolate("r8uint", "nearest")

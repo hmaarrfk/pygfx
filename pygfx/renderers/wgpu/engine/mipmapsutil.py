@@ -56,10 +56,10 @@ mipmap_fragment_source = """
 """
 
 
-# Without the 'float32-filterable' feature, a float32 texture cannot be sampled
-# with the (linear) sampler: average the 2x2 texels with textureLoad instead,
-# which is what the linear sampler does at the center of a texel of the next
-# level.
+# For a format that the device cannot filter (float32 without the
+# 'float32-filterable' feature): average the 2x2 texels with textureLoad, which
+# is what the linear sampler does at the center of a texel of the next level
+# (exactly so for even sizes). This shader has no sampler binding.
 mipmap_fragment_source_load = """
 
     @group( 0 ) @binding( 1 )
@@ -77,6 +77,15 @@ mipmap_fragment_source_load = """
         return color * 0.25;
     }
 """
+
+
+def _mipmaps_with_sampler(format):
+    """Whether mipmaps of this format are made with the linear sampler.
+
+    Else with ``mipmap_fragment_source_load``. The pipeline and the bind group
+    must agree on it.
+    """
+    return texture_format_is_filterable(format)
 
 
 def get_mip_level_count(texture):
@@ -176,9 +185,8 @@ def get_bind_group(
         if mipmap_sampler is None:
             mipmap_sampler = device.create_sampler(min_filter="linear")
 
-        # The shader without a sampler (see get_mipmap_pipeline) has no binding 0
         entries = [wgpu.BindGroupEntry(binding=1, resource=src_view)]
-        if texture_format_is_filterable(texture._wgpu_object.format):
+        if _mipmaps_with_sampler(texture._wgpu_object.format):
             entries.append(wgpu.BindGroupEntry(binding=0, resource=mipmap_sampler))
         bind_group = device.create_bind_group(layout=bind_group_layout, entries=entries)
         setattr(texture, key, bind_group)
@@ -193,9 +201,7 @@ def get_mipmap_pipeline(device, texture):
     if pipeline is None:
         vertex_module = device.create_shader_module(code=mipmap_vertex_source)
 
-        # Average with the linear sampler if the device can filter the format,
-        # else with textureLoad (float32 without 'float32-filterable')
-        if texture_format_is_filterable(format):
+        if _mipmaps_with_sampler(format):
             frag_source = mipmap_fragment_source
         else:
             frag_source = mipmap_fragment_source_load

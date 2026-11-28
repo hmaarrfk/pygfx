@@ -6,6 +6,7 @@ WGSL code, as well as providing the information to connect it to the resources
 
 from ....resources import Buffer, Texture
 from ..engine.utils import (
+    ADDRESS_MODES,
     GfxSampler,
     GfxTextureView,
     to_vertex_format,
@@ -333,8 +334,13 @@ class BaseShader(ShaderInterface):
                 # reads the texels, and wraps and interpolates as the sampler
                 # would (colormap.wgsl).
                 self["colormap_format"] = "f32-load"
+                # The names of wgpu's address modes, as GfxSampler gives
+                # them to the sampler; z repeats the last mode, as it does.
+                wraps = [ADDRESS_MODES.get(w, w) for w in (map.wrap_s, map.wrap_t)]
+                self["colormap_wrap"] = [*wraps, wraps[-1]]
+                # One filter: the shader does not know whether a fragment
+                # magnifies or minifies (colormaps have no mipmaps).
                 self["colormap_filter"] = map.mag_filter
-                self["colormap_wrap"] = [map.wrap_s, map.wrap_t, map.wrap_t]
         elif "uint" in fmt:
             self["colormap_format"] = "u32"
         else:

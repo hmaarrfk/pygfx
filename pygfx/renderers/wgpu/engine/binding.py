@@ -9,6 +9,7 @@ from .update import ensure_wgpu_object, ALTTEXFORMAT
 from .shared import (
     TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE,
     texture_format_is_filterable,
+    texture_sample_type,
 )
 
 
@@ -37,12 +38,16 @@ def sampler_binding_for_texture(name, filter, address_mode, view, visibility):
         return Binding(
             name, "sampler/filtering", GfxSampler(filter, address_mode), visibility
         )
-    # filter is e.g. "linear" or "linear, nearest, linear" (mag, min, mipmap)
+    # filter is e.g. "linear" or "linear, nearest, linear" (mag, min, mipmap):
+    # warn if any of them is lost
     asked_for_linear = "linear" in filter
     if asked_for_linear and fmt not in _warned_unfilterable:
         _warned_unfilterable.add(fmt)
         features = TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE.get(fmt)
-        why = f"no {' or '.join(map(repr, features))} feature" if features else "never"
+        if features:
+            why = f"no {' or '.join(map(repr, features))} feature"
+        else:
+            why = "integer and depth formats are never filterable"
         logger.warning(
             f"The device cannot filter {fmt} textures ({why}): "
             f"{name} samples with 'nearest' instead of '{filter}'."
@@ -177,26 +182,7 @@ class Binding:
             sample_type = getattr(wgpu.TextureSampleType, subtype, subtype)
             # Derive sample type from texture
             if sample_type == "auto":
-                fmt = to_texture_format(resource.format)
-                fmt = ALTTEXFORMAT.get(fmt, [fmt])[0]
-                if "float" in fmt or "norm" in fmt:
-                    # A format that the device cannot filter (float32 without
-                    # the 'float32-filterable' feature) must be bound as
-                    # unfilterable. The shader then reads it with textureLoad,
-                    # or with a non-filtering sampler (see
-                    # sampler_binding_for_texture()).
-                    if texture_format_is_filterable(fmt):
-                        sample_type = wgpu.TextureSampleType.float
-                    else:
-                        sample_type = wgpu.TextureSampleType.unfilterable_float
-                elif "uint" in fmt:
-                    sample_type = wgpu.TextureSampleType.uint
-                elif "sint" in fmt:
-                    sample_type = wgpu.TextureSampleType.sint
-                elif "depth" in fmt:
-                    sample_type = wgpu.TextureSampleType.depth
-                else:
-                    raise ValueError("Could not determine texture sample type.")
+                sample_type = texture_sample_type(to_texture_format(resource.format))
             bind_group_layout_entry = wgpu.BindGroupLayoutEntry(
                 binding=slot,
                 visibility=self.visibility,

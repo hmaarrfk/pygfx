@@ -66,12 +66,12 @@ $$ for axis, wrap in [('x', colormap_wrap[0]), ('y', colormap_wrap[1]), ('z', co
 fn colormap_wrap_{{ axis }}(i: i32, n: i32) -> i32 {
     $$ if wrap == 'repeat'
     return ((i % n) + n) % n;
-    $$ elif wrap == 'mirror'
+    $$ elif wrap == 'mirror-repeat'
     let p = 2 * n;
     let m = ((i % p) + p) % p;
     return select(m, p - 1 - m, m >= n);
     $$ else
-    return clamp(i, 0, n - 1);
+    return clamp(i, 0, n - 1);  // 'clamp-to-edge'
     $$ endif
 }
 $$ endfor
