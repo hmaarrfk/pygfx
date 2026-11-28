@@ -4,10 +4,10 @@ from ....resources import Buffer
 from ....utils import logger
 
 
-from .utils import to_texture_format, GfxSampler, GfxTextureView
-from .update import ensure_wgpu_object, ALTTEXFORMAT
+from .utils import to_texture_format, GfxSampler, GfxTextureView, ALTTEXFORMAT
+from .update import ensure_wgpu_object
 from .shared import (
-    TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE,
+    features_to_filter,
     texture_format_is_filterable,
     texture_sample_type,
 )
@@ -23,38 +23,29 @@ _warned_unfilterable = set()
 
 
 def sampler_binding_for_texture(name, filter, address_mode, view, visibility):
-    """Get the Binding for a sampler that samples the given texture view.
+    """The Binding of a sampler with this filter, for this texture view.
 
-    Normally a filtering sampler with the given filter. A texture whose format
-    the device cannot filter (float32 without the 'float32-filterable'
-    feature) gets a non-filtering one, with 'nearest', and a warning (once per
-    format) if that changes the requested filter. Shaders
-    that can interpolate in the shader (images, volumes, colormaps) use
-    textureLoad instead, and do not need this.
+    A filtering sampler, or, for a format that the device cannot filter, a
+    non-filtering one with 'nearest' (with a warning, once per format).
     """
     fmt = to_texture_format(view.format)
-    fmt = ALTTEXFORMAT.get(fmt, [fmt])[0]
     if texture_format_is_filterable(fmt):
-        return Binding(
-            name, "sampler/filtering", GfxSampler(filter, address_mode), visibility
-        )
-    # filter is e.g. "linear" or "linear, nearest, linear" (mag, min, mipmap):
-    # warn if any of them is lost
-    asked_for_linear = "linear" in filter
-    if asked_for_linear and fmt not in _warned_unfilterable:
+        sampler = GfxSampler(filter, address_mode)
+        return Binding(name, "sampler/filtering", sampler, visibility)
+    # filter is e.g. "linear" or "linear, nearest, linear" (mag, min, mipmap)
+    if "linear" in filter and fmt not in _warned_unfilterable:
         _warned_unfilterable.add(fmt)
-        features = TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE.get(fmt)
+        features = features_to_filter(fmt)
         if features:
-            why = f"no {' or '.join(map(repr, features))} feature"
+            why = f"the device cannot filter {fmt} textures (no "
+            why += " or ".join(repr(f) for f in features) + " feature)"
         else:
-            why = "integer and depth formats are never filterable"
+            why = f"{fmt} textures cannot be filtered"
         logger.warning(
-            f"The device cannot filter {fmt} textures ({why}): "
-            f"{name} samples with 'nearest' instead of '{filter}'."
+            f"{name}: {why}, so it samples with 'nearest' instead of '{filter}'."
         )
-    return Binding(
-        name, "sampler/non_filtering", GfxSampler("nearest", address_mode), visibility
-    )
+    sampler = GfxSampler("nearest", address_mode)
+    return Binding(name, "sampler/non_filtering", sampler, visibility)
 
 
 class Binding:

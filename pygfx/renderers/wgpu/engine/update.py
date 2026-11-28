@@ -181,11 +181,10 @@ def ensure_wgpu_object(resource):
         filters = resource.filter.replace(",", " ").split() or ["nearest"]
         while len(filters) < 3:
             filters.append(filters[-1])
-        ammap = ADDRESS_MODES
         resource._wgpu_object = device.create_sampler(
-            address_mode_u=ammap.get(amodes[0], amodes[0]),
-            address_mode_v=ammap.get(amodes[1], amodes[1]),
-            address_mode_w=ammap.get(amodes[2], amodes[2]),
+            address_mode_u=ADDRESS_MODES.get(amodes[0], amodes[0]),
+            address_mode_v=ADDRESS_MODES.get(amodes[1], amodes[1]),
+            address_mode_w=ADDRESS_MODES.get(amodes[2], amodes[2]),
             mag_filter=filters[0],
             min_filter=filters[1],
             mipmap_filter=filters[2],

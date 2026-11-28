@@ -58,9 +58,9 @@ fn sample_colormap_nomaprange(texcoord: {{ colormap_coord_type }}) -> vec4<f32> 
 
 
 $$ if colormap_format == 'f32-load'
-// A float32 colormap on a device without the 'float32-filterable' feature: the
-// texture cannot be sampled with a filtering sampler, so read the texels with
-// textureLoad, and wrap and interpolate as the sampler would.
+// A float32 colormap on a device without the 'float32-filterable' feature: it
+// cannot be sampled with a filtering sampler, so read the texels with
+// textureLoad, and wrap and filter as the sampler would.
 
 $$ for axis, wrap in [('x', colormap_wrap[0]), ('y', colormap_wrap[1]), ('z', colormap_wrap[2])]
 fn colormap_wrap_{{ axis }}(i: i32, n: i32) -> i32 {
@@ -77,57 +77,73 @@ fn colormap_wrap_{{ axis }}(i: i32, n: i32) -> i32 {
 $$ endfor
 
 $$ if colormap_dim == '1d'
-fn colormap_load(i: i32, n: i32) -> vec4<f32> {
-    return textureLoad(t_colormap, colormap_wrap_x(i, n), 0);
-}
-fn sample_colormap_f32_load(uv: f32) -> vec4<f32> {
-    let n = i32(textureDimensions(t_colormap));
-    $$ if colormap_filter == 'linear'
-    let pos = uv * f32(n) - 0.5;
-    let i0 = i32(floor(pos));
-    let t = pos - floor(pos);
-    return mix(colormap_load(i0, n), colormap_load(i0 + 1, n), t);
-    $$ else
-    return colormap_load(i32(floor(uv * f32(n))), n);
-    $$ endif
-}
+    $$ set ivec = 'i32'
+    $$ set fvec = 'f32'
 $$ elif colormap_dim == '2d'
-fn colormap_load(i: vec2<i32>, n: vec2<i32>) -> vec4<f32> {
-    return textureLoad(t_colormap, vec2<i32>(colormap_wrap_x(i.x, n.x), colormap_wrap_y(i.y, n.y)), 0);
-}
-fn sample_colormap_f32_load(uv: vec2<f32>) -> vec4<f32> {
-    let n = vec2<i32>(textureDimensions(t_colormap));
-    $$ if colormap_filter == 'linear'
-    let pos = uv * vec2<f32>(n) - 0.5;
-    let i0 = vec2<i32>(floor(pos));
-    let t = pos - floor(pos);
-    let c0 = mix(colormap_load(i0, n), colormap_load(i0 + vec2<i32>(1, 0), n), t.x);
-    let c1 = mix(colormap_load(i0 + vec2<i32>(0, 1), n), colormap_load(i0 + vec2<i32>(1, 1), n), t.x);
-    return mix(c0, c1, t.y);
-    $$ else
-    return colormap_load(vec2<i32>(floor(uv * vec2<f32>(n))), n);
-    $$ endif
-}
-$$ elif colormap_dim == '3d'
-fn colormap_load(i: vec3<i32>, n: vec3<i32>) -> vec4<f32> {
-    return textureLoad(t_colormap, vec3<i32>(colormap_wrap_x(i.x, n.x), colormap_wrap_y(i.y, n.y), colormap_wrap_z(i.z, n.z)), 0);
-}
-fn sample_colormap_f32_load(uv: vec3<f32>) -> vec4<f32> {
-    let n = vec3<i32>(textureDimensions(t_colormap));
-    $$ if colormap_filter == 'linear'
-    let pos = uv * vec3<f32>(n) - 0.5;
-    let i0 = vec3<i32>(floor(pos));
-    let t = pos - floor(pos);
-    var c: array<vec4<f32>, 2>;
-    for (var z = 0; z < 2; z++) {
-        let c0 = mix(colormap_load(i0 + vec3<i32>(0, 0, z), n), colormap_load(i0 + vec3<i32>(1, 0, z), n), t.x);
-        let c1 = mix(colormap_load(i0 + vec3<i32>(0, 1, z), n), colormap_load(i0 + vec3<i32>(1, 1, z), n), t.x);
-        c[z] = mix(c0, c1, t.y);
-    }
-    return mix(c[0], c[1], t.z);
-    $$ else
-    return colormap_load(vec3<i32>(floor(uv * vec3<f32>(n))), n);
-    $$ endif
-}
+    $$ set ivec = 'vec2<i32>'
+    $$ set fvec = 'vec2<f32>'
+$$ else
+    $$ set ivec = 'vec3<i32>'
+    $$ set fvec = 'vec3<f32>'
 $$ endif
+
+fn colormap_load(i: {{ ivec }}, n: {{ ivec }}) -> vec4<f32> {
+    $$ if colormap_dim == '1d'
+    let wrapped = colormap_wrap_x(i, n);
+    $$ elif colormap_dim == '2d'
+    let wrapped = vec2<i32>(colormap_wrap_x(i.x, n.x), colormap_wrap_y(i.y, n.y));
+    $$ else
+    let wrapped = vec3<i32>(
+        colormap_wrap_x(i.x, n.x), colormap_wrap_y(i.y, n.y), colormap_wrap_z(i.z, n.z)
+    );
+    $$ endif
+    return textureLoad(t_colormap, wrapped, 0);
+}
+
+fn colormap_nearest(uv: {{ fvec }}) -> vec4<f32> {
+    let n = {{ ivec }}(textureDimensions(t_colormap));
+    return colormap_load({{ ivec }}(floor(uv * {{ fvec }}(n))), n);
+}
+
+fn colormap_linear(uv: {{ fvec }}) -> vec4<f32> {
+    // Weigh the 2, 4 or 8 texels around uv; texel centers are at +0.5
+    let n = {{ ivec }}(textureDimensions(t_colormap));
+    let pos = uv * {{ fvec }}(n) - 0.5;
+    let i0 = {{ ivec }}(floor(pos));
+    let t = fract(pos);
+    var color = vec4<f32>(0.0);
+    $$ for dz in ([0, 1] if colormap_dim == '3d' else [0])
+    $$ for dy in ([0, 1] if colormap_dim != '1d' else [0])
+    $$ for dx in [0, 1]
+        $$ if colormap_dim == '1d'
+    color += {{ 't' if dx else '(1.0 - t)' }} * colormap_load(i0 + {{ dx }}, n);
+        $$ else
+            $$ set wx = 't.x' if dx else '(1.0 - t.x)'
+            $$ set wy = 't.y' if dy else '(1.0 - t.y)'
+            $$ set wz = 't.z' if dz else '(1.0 - t.z)'
+            $$ if colormap_dim == '2d'
+    color += {{ wx }} * {{ wy }} * colormap_load(i0 + vec2<i32>({{ dx }}, {{ dy }}), n);
+            $$ else
+    color += {{ wx }} * {{ wy }} * {{ wz }} * colormap_load(i0 + vec3<i32>({{ dx }}, {{ dy }}, {{ dz }}), n);
+            $$ endif
+        $$ endif
+    $$ endfor
+    $$ endfor
+    $$ endfor
+    return color;
+}
+
+fn sample_colormap_f32_load(uv: {{ fvec }}) -> vec4<f32> {
+    $$ if colormap_mag_filter == colormap_min_filter
+    return colormap_{{ colormap_mag_filter }}(uv);
+    $$ else
+    // As the sampler: the min filter where the colormap is minified, i.e.
+    // where a pixel covers more than a texel (level of detail > 0)
+    let texels = uv * {{ fvec }}(textureDimensions(t_colormap));
+    let lod = log2(max(length(dpdx(texels)), length(dpdy(texels))));
+    let magnified = colormap_{{ colormap_mag_filter }}(uv);
+    let minified = colormap_{{ colormap_min_filter }}(uv);
+    return select(magnified, minified, lod > 0.0);
+    $$ endif
+}
 $$ endif

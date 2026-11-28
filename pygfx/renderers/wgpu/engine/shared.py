@@ -29,24 +29,21 @@ stdinfo_uniform_type = dict(
 )
 
 
-def _has_preferred_features():
-    return (
-        "preferred_features"
-        in inspect.signature(wgpu.utils.device.preconfigure_default_device).parameters
-    )
+# wgpu-py >= 0.32 can prefer features: use them if the adapter has them
+_HAS_PREFERRED_FEATURES = (
+    "preferred_features"
+    in inspect.signature(wgpu.utils.device.preconfigure_default_device).parameters
+)
 
 
 def _preconfigure_wgpu_device():
 
-    # PyGfx uses 'float32-filterable' when it is available, because vanilla
-    # WebGPU does not support interpolating samplers for float32 textures,
-    # which is sad for e.g. volume rendering. When it is not available (e.g.
-    # the PowerVR GPU of the Pixel 10, some Mali GPUs), float32 textures are
-    # declared unfilterable, and interpolated in the shader instead (images,
-    # volumes, colormaps), or sampled with 'nearest' (see
-    # ``binding.sampler_binding_for_texture()``). wgpu-py < 0.32 has no preferred_features:
-    # there the feature stays required.
-    if _has_preferred_features():
+    # 'float32-filterable' (filtering samplers for float32 textures) is
+    # preferred, not required. Without it (e.g. some mobile GPUs) float32
+    # textures are bound unfilterable, and interpolated in the shader or sampled
+    # with 'nearest' (see binding.sampler_binding_for_texture). With wgpu-py <
+    # 0.32 it stays required.
+    if _HAS_PREFERRED_FEATURES:
         wgpu.preconfigure_default_device(
             "pygfx", preferred_features={"float32-filterable"}
         )
@@ -237,7 +234,8 @@ def select_adapter(adapter):
 def enable_wgpu_features(*features):
     """Enable specific features (as strings) on the wgpu device.
 
-    This is an alias to ``wgpu.preconfigure_default_device(.., required_features=...)``.
+    This calls ``wgpu.preconfigure_default_device(.., required_features=...)``;
+    features turned off with "!" are also passed as ``preferred_features``.
 
     WARNING: enabling features means that your code may not work on all
     devices. The point of wgpu is that it can make a promise that a
@@ -245,11 +243,13 @@ def enable_wgpu_features(*features):
     breaks that promise, and may cause your code to not work on e.g.
     mobile devices or certain operating systems.
 
-    Features can also be turned off by prefixing with "!". E.g.
-    ``enable_wgpu_features("!float32-filterable")`` renders as on a device
-    without that feature: float32 images, volumes and colormaps are then
-    interpolated in the shader, and float32 texture maps of meshes, background
-    images and sprites are sampled with 'nearest'.
+    Features can also be turned off by prefixing with "!". Use with care; some
+    parts of Pygfx will not function without the default features enabled
+    (e.g. "!depth32float-stencil8"). An exception is
+    ``enable_wgpu_features("!float32-filterable")``, which renders as on a
+    device without that feature: float32 images, volumes and colormaps are
+    then interpolated in the shader, and float32 texture maps of meshes,
+    background images and sprites are sampled with 'nearest'.
 
     This function must be called before before the first ``Renderer`` is created.
     It can be called multiple times to enable more features. Note that feature names
@@ -266,7 +266,7 @@ def enable_wgpu_features(*features):
     wgpu.preconfigure_default_device("pygfx", required_features=features)
     # A feature that pygfx only prefers (float32-filterable) is turned off there too.
     features_off = {f for f in features if f.startswith("!")}
-    if features_off and _has_preferred_features():
+    if features_off and _HAS_PREFERRED_FEATURES:
         wgpu.preconfigure_default_device("pygfx", preferred_features=features_off)
 
 
@@ -313,21 +313,24 @@ TEXTURE_FORMATS_FILTERABLE = {
     "rgba16float",
 }
 
-# Filterable only with a feature. For float32 the format exists on every
-# device, but filtering it is the 'float32-filterable' feature. The others only
-# exist with their feature, and are then filterable. Any one of the features
-# of a format will do (wgpu-native has its own name for the 16-bit norm one).
-_NORM16 = ("texture-formats-tier1", "texture-format16bit-norm")
+# Filterable only with a feature, any one of those listed. float32 exists on
+# every device; filtering it is the 'float32-filterable' feature. The 16-bit
+# norm formats exist with 'texture-formats-tier1', but Dawn binds them as
+# unfilterable-float unless it has 'unorm16-filterable' (there is no snorm
+# one); wgpu-native's 'texture-format16bit-norm' makes them filterable. The
+# compressed formats exist only with their feature, and are then filterable.
+_UNORM16 = ("unorm16-filterable", "texture-format16bit-norm")
+_SNORM16 = ("texture-format16bit-norm",)
 TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE = {
     "r32float": ("float32-filterable",),
     "rg32float": ("float32-filterable",),
     "rgba32float": ("float32-filterable",),
-    "r16unorm": _NORM16,
-    "r16snorm": _NORM16,
-    "rg16unorm": _NORM16,
-    "rg16snorm": _NORM16,
-    "rgba16unorm": _NORM16,
-    "rgba16snorm": _NORM16,
+    "r16unorm": _UNORM16,
+    "r16snorm": _SNORM16,
+    "rg16unorm": _UNORM16,
+    "rg16snorm": _SNORM16,
+    "rgba16unorm": _UNORM16,
+    "rgba16snorm": _SNORM16,
 }
 for _format in wgpu.TextureFormat:
     for _prefix, _feature in [
@@ -377,6 +380,12 @@ def texture_format_is_filterable(format):
             "assuming that it cannot be sampled with filtering."
         )
     return False
+
+
+def features_to_filter(format):
+    """The features of which the device needs one to filter this format, or ()."""
+    format = ALTTEXFORMAT.get(str(format), [str(format)])[0]
+    return TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE.get(format, ())
 
 
 def texture_sample_type(format):

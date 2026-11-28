@@ -67,6 +67,9 @@ from .engine.shared import (
     select_adapter,
     enable_wgpu_features,
     set_wgpu_limits,
+    texture_format_is_filterable,
+    texture_sample_type,
+    sampler_can_interpolate,
 )
 from .engine.renderer import WgpuRenderer
 from .engine.effectpasses import (

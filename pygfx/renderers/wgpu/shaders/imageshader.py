@@ -4,15 +4,17 @@ from ....objects import Image
 from ....materials import ImageBasicMaterial
 from ....resources import Texture
 
-from ..engine.shared import sampler_can_interpolate, texture_sample_type
 from .. import (
     register_wgpu_render_function,
     BaseShader,
     Binding,
     to_texture_format,
-    GfxSampler,
     GfxTextureView,
     load_wgsl,
+    sampler_binding_for_texture,
+    sampler_can_interpolate,
+    texture_sample_type,
+    texture_format_is_filterable,
 )
 
 
@@ -55,12 +57,6 @@ class ImageShader(BaseShader):
         else:
             self["img_format"] = "i32"
 
-        interpolation = material.interpolation
-        if sampler_can_interpolate(fmt, interpolation):
-            self["interpolation"] = "via-sampler"
-        else:
-            self["interpolation"] = interpolation  # in the shader
-
         # Set gamma
         self["gamma"] = material.gamma
 
@@ -82,6 +78,18 @@ class ImageShader(BaseShader):
             self["use_colormap"] = True
             self["colorspace"] = material.map.texture.colorspace
 
+        interpolation = material.interpolation
+        # The shader converts YUV only from what a sampler gives, so YUV data
+        # that the device cannot filter (float32 without 'float32-filterable')
+        # gets a non-filtering sampler: 'nearest' (sampler_binding_for_texture).
+        yuv_needs_sampler = self["colorspace"] in ("yuv420p", "yuv444p")
+        if sampler_can_interpolate(fmt, interpolation):
+            self["interpolation"] = "via-sampler"
+        elif yuv_needs_sampler and not texture_format_is_filterable(fmt):
+            self["interpolation"] = "via-sampler"
+        else:
+            self["interpolation"] = interpolation  # in the shader
+
     def get_bindings(self, wobject, shared, scene):
         geometry = wobject.geometry
         material = wobject.material
@@ -95,8 +103,11 @@ class ImageShader(BaseShader):
         tex_view = GfxTextureView(geometry.grid)
         bindings.append(Binding("t_img", "texture/auto", tex_view, vertex_and_fragment))
         if self["interpolation"] == "via-sampler":
-            sampler = GfxSampler(material.interpolation, "clamp")
-            bindings.append(Binding("s_img", "sampler/filtering", sampler, "FRAGMENT"))
+            bindings.append(
+                sampler_binding_for_texture(
+                    "s_img", material.interpolation, "clamp", tex_view, "FRAGMENT"
+                )
+            )
 
         if self["three_grid_yuv"]:
             u_tex_view = GfxTextureView(geometry.grid_u)

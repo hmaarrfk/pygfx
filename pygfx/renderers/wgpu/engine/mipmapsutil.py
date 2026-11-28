@@ -57,24 +57,26 @@ mipmap_fragment_source = """
 
 
 # For a format that the device cannot filter (float32 without the
-# 'float32-filterable' feature): average the 2x2 texels with textureLoad, which
-# is what the linear sampler does at the center of a texel of the next level
-# (exactly so for even sizes). This shader has no sampler binding.
+# 'float32-filterable' feature): what the linear clamp-to-edge sampler gives at
+# the texel centers of the next level, with textureLoad. This shader has no
+# sampler binding.
 mipmap_fragment_source_load = """
 
     @group( 0 ) @binding( 1 )
     var img : texture_2d<f32>;
     @fragment
-    fn main( @builtin( position ) pos : vec4<f32> ) -> @location( 0 ) vec4<f32> {
+    fn main( @location( 0 ) vTex : vec2<f32> ) -> @location( 0 ) vec4<f32> {
         let size = vec2<i32>( textureDimensions( img ) );
-        let p = vec2<i32>( pos.xy ) * 2;
-        var color = vec4<f32>( 0.0 );
-        for ( var dy = 0; dy < 2; dy++ ) {
-            for ( var dx = 0; dx < 2; dx++ ) {
-                color += textureLoad( img, min( p + vec2<i32>( dx, dy ), size - 1 ), 0 );
-            }
-        }
-        return color * 0.25;
+        let p = vTex * vec2<f32>( size ) - 0.5;
+        let i0 = vec2<i32>( floor( p ) );
+        let t = fract( p );
+        let lo = vec2<i32>( 0 );
+        let hi = size - 1;
+        let c00 = textureLoad( img, clamp( i0, lo, hi ), 0 );
+        let c10 = textureLoad( img, clamp( i0 + vec2<i32>( 1, 0 ), lo, hi ), 0 );
+        let c01 = textureLoad( img, clamp( i0 + vec2<i32>( 0, 1 ), lo, hi ), 0 );
+        let c11 = textureLoad( img, clamp( i0 + vec2<i32>( 1, 1 ), lo, hi ), 0 );
+        return mix( mix( c00, c10, t.x ), mix( c01, c11, t.x ), t.y );
     }
 """
 
@@ -160,7 +162,7 @@ def get_bind_group(
     base_array_layer,
     mip_level,
     src_view,
-    with_sampler=True,
+    with_sampler,
 ):
     # Get the bind group that includes the two subsequent texture views.
     # We cache this on the texture object to avoid re-creating the views
@@ -200,7 +202,7 @@ def get_bind_group(
     return bind_group, dst_view
 
 
-def get_mipmap_pipeline(device, texture, with_sampler=True):
+def get_mipmap_pipeline(device, texture, with_sampler):
     format = texture._wgpu_object.format
     pipeline = MIPMAP_CACHE.get(format)
 

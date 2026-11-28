@@ -4,7 +4,6 @@ from ....objects import Volume
 from ....materials import VolumeSliceMaterial, VolumeRayMaterial
 from ....resources import Texture
 
-from ..engine.shared import sampler_can_interpolate, texture_sample_type
 from .. import (
     register_wgpu_render_function,
     BaseShader,
@@ -13,6 +12,8 @@ from .. import (
     GfxSampler,
     GfxTextureView,
     load_wgsl,
+    sampler_can_interpolate,
+    texture_sample_type,
 )
 
 vertex_and_fragment = wgpu.ShaderStage.VERTEX | wgpu.ShaderStage.FRAGMENT
