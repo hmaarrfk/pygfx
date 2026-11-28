@@ -378,6 +378,21 @@ def texture_format_is_filterable(format):
     return False
 
 
+def sampler_can_interpolate(format, interpolation):
+    """Whether a sampler can do this interpolation of a texture of this format.
+
+    For images and volumes: they interpolate their data with a sampler when
+    they can, and else in the shader, reading the texels with textureLoad.
+    A sampler only knows 'nearest' and 'linear' (the shader does 'cubic' and
+    the others), and only for a format that the device can filter: not for
+    integer data, nor for float32 data on a device without the
+    'float32-filterable' feature.
+    """
+    return interpolation in ("nearest", "linear") and texture_format_is_filterable(
+        format
+    )
+
+
 def get_shared():
     """Get the globally shared instance.
 

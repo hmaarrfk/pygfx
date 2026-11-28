@@ -37,7 +37,9 @@ def sampler_binding_for_texture(name, filter, address_mode, view, visibility):
         return Binding(
             name, "sampler/filtering", GfxSampler(filter, address_mode), visibility
         )
-    if "linear" in filter and fmt not in _warned_unfilterable:
+    # filter is e.g. "linear" or "linear, nearest, linear" (mag, min, mipmap)
+    asked_for_linear = "linear" in filter
+    if asked_for_linear and fmt not in _warned_unfilterable:
         _warned_unfilterable.add(fmt)
         features = TEXTURE_FORMATS_FILTERABLE_WITH_FEATURE.get(fmt)
         why = f"no {' or '.join(map(repr, features))} feature" if features else "never"
@@ -178,12 +180,14 @@ class Binding:
                 fmt = to_texture_format(resource.format)
                 fmt = ALTTEXFORMAT.get(fmt, [fmt])[0]
                 if "float" in fmt or "norm" in fmt:
-                    sample_type = wgpu.TextureSampleType.float
-                    # Without the 'float32-filterable' feature, a float32
-                    # texture can only be bound as unfilterable: the shader
-                    # then reads it with textureLoad, or with a non-filtering
-                    # sampler (see sampler_for_texture()).
-                    if not texture_format_is_filterable(fmt):
+                    # A format that the device cannot filter (float32 without
+                    # the 'float32-filterable' feature) must be bound as
+                    # unfilterable. The shader then reads it with textureLoad,
+                    # or with a non-filtering sampler (see
+                    # sampler_binding_for_texture()).
+                    if texture_format_is_filterable(fmt):
+                        sample_type = wgpu.TextureSampleType.float
+                    else:
                         sample_type = wgpu.TextureSampleType.unfilterable_float
                 elif "uint" in fmt:
                     sample_type = wgpu.TextureSampleType.uint

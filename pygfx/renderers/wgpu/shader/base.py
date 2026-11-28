@@ -326,10 +326,12 @@ class BaseShader(ShaderInterface):
         # Sampling type
         fmt = to_texture_format(texture_view.format)
         if "norm" in fmt or "float" in fmt:
-            self["colormap_format"] = "f32"
-            if not texture_format_is_filterable(fmt):
-                # The device cannot filter float32 (no 'float32-filterable'):
-                # the shader reads the texels and does what the sampler would.
+            if texture_format_is_filterable(fmt):
+                self["colormap_format"] = "f32"  # textureSample
+            else:
+                # float32 without the 'float32-filterable' feature: the shader
+                # reads the texels, and wraps and interpolates as the sampler
+                # would (colormap.wgsl).
                 self["colormap_format"] = "f32-load"
                 self["colormap_filter"] = map.mag_filter
                 self["colormap_wrap"] = [map.wrap_s, map.wrap_t, map.wrap_t]

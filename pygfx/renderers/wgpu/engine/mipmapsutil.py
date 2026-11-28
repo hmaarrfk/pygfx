@@ -176,9 +176,10 @@ def get_bind_group(
         if mipmap_sampler is None:
             mipmap_sampler = device.create_sampler(min_filter="linear")
 
+        # The shader without a sampler (see get_mipmap_pipeline) has no binding 0
         entries = [wgpu.BindGroupEntry(binding=1, resource=src_view)]
         if texture_format_is_filterable(texture._wgpu_object.format):
-            entries.insert(0, wgpu.BindGroupEntry(binding=0, resource=mipmap_sampler))
+            entries.append(wgpu.BindGroupEntry(binding=0, resource=mipmap_sampler))
         bind_group = device.create_bind_group(layout=bind_group_layout, entries=entries)
         setattr(texture, key, bind_group)
 
@@ -192,11 +193,13 @@ def get_mipmap_pipeline(device, texture):
     if pipeline is None:
         vertex_module = device.create_shader_module(code=mipmap_vertex_source)
 
-        frag_module = device.create_shader_module(
-            code=mipmap_fragment_source
-            if texture_format_is_filterable(format)
-            else mipmap_fragment_source_load
-        )
+        # Average with the linear sampler if the device can filter the format,
+        # else with textureLoad (float32 without 'float32-filterable')
+        if texture_format_is_filterable(format):
+            frag_source = mipmap_fragment_source
+        else:
+            frag_source = mipmap_fragment_source_load
+        frag_module = device.create_shader_module(code=frag_source)
 
         pipeline = device.create_render_pipeline(
             layout="auto",
